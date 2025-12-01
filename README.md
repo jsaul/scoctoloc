@@ -1,2 +1,64 @@
 # scoctoloc
-SeisComP wrappers for PyOcto
+
+The use of a global associator in scautoloc makes it suitable for locating seismic events world-wide, because it is able to associate events using tricks specifically tuned to work with teleseismic pick data.
+For small networks, a lot of what scautoloc does is unneeded and is in fact overkill when locating seismic events at a regional or even local scale.
+
+This is where scoctoloc comes into play.
+scoctoloc is the scautoloc equivalent for small networks.
+It uses the very efficient PyOcto associator.
+
+
+# Basic Usage
+
+There are two main use cases for scoctoloc:
+
+- real-time (online) mode with pick data arriving via messaging
+- offline mode with bulk parametric data read either from database or XML
+
+
+
+## Offline mode
+
+We need an inventory and the parametric data, both as SeisComP XML files.
+
+An example call might look like this
+
+```
+scoctoloc \
+	--inventory-xml inventory.xml \
+	--input-xml gfz2024tdcj.xml \
+	--whitelist whitelist.txt \
+	--center-latlon -22,-70 \
+	--output-xml output.xml \
+	--debug
+```
+
+Pretty self-explaining so far.
+The whitelist contains a list of network and station codes to filter against, in order to only work with a specific subset of the data.
+The network center latitude and longitude define the projection center of out network
+
+
+## Real-time (online) mode
+
+Not implemented yet.
+First the offline mode needs to be tested thoroughly.
+
+
+## Playback (real-time simulation) mode
+
+This is currently working partially.
+You can try it out like in the offline example above by simply adding the `--playback` option.
+No output is currently generated though, only logs.
+Therefore make sure you run in `--debug` mode.
+
+
+# Tests
+
+Work in progress.
+
+
+# Issues
+
+* See [this issue on Github](https://github.com/yetinam/pyocto/issues/21).
+  This is the reason why we have to `import pyrocko.modelling` before any SeisComP imports until a better solution is found.
+* A lot more configuration options need to be added.
