@@ -1,20 +1,25 @@
 # scoctoloc
 
-The use of a global associator in scautoloc makes it suitable for locating seismic events world-wide, because it is able to associate events using tricks specifically tuned to work with teleseismic pick data.
-For small networks, a lot of what scautoloc does is unneeded and is in fact overkill when locating seismic events at a regional or even local scale.
+The use of a *global* associator in scautoloc makes it suitable for locating seismic events world-wide, because it is able to associate events using tricks specifically tuned to work with teleseismic pick data.
+For smaller networks, when locating seismic events at a *regional* or even *local* scale, a lot of what scautoloc does is unneeded and is in fact overkill.
 
 This is where scoctoloc comes into play.
-scoctoloc is the scautoloc equivalent for small networks.
-It uses the very efficient PyOcto associator.
+It uses the very efficient PyOcto associator, hence the name 'scoctoloc'.
+
+scoctoloc is the scautoloc sibling for *small* networks of up to approximately 800 km.
+In fact it is meant to replace scautoloc in regional/local monitoring setups.
 
 
-# Main use cases
+## Main use cases
 
-There are two main use cases for scoctoloc:
+There are three main use cases for scoctoloc:
 
-- real-time (online) mode with pick data arriving via messaging
-- offline mode with bulk parametric data read either from database or XML
-- offline playback mode that simulates real-time behaviour
+- Real-time (online) mode with pick data arriving via messaging.
+  This is what most users will use scoctoloc for.
+- Offline mode with bulk parametric data read either from database or XML.
+  Could be the post-processing of data from a temporary experiment.
+- Offline playback mode that simulates real-time behaviour.
+  This is mostly for testing or post mortem analysis in case something went wrong.
 
 
 ## Real-time (online) mode
