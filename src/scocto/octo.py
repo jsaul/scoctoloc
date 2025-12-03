@@ -2,9 +2,8 @@ import time
 import datetime
 import pathlib
 import pandas
-import seiscomp.logging
+import seiscomp.logging as log
 import seiscomp.datamodel
-import seiscomp.seismology
 import scstuff.util
 import scstuff.inventory
 import pyproj
@@ -16,7 +15,7 @@ debug_dir = pathlib.Path("debug")
 
 
 def convertPicksToPyOcto(objects):
-    seiscomp.logging.debug("Preparing pyocto picks")
+    log.debug("Preparing pyocto picks")
     picks = pandas.core.frame.DataFrame()
 
     _st  = list()
@@ -28,7 +27,7 @@ def convertPicksToPyOcto(objects):
         pick = seiscomp.datamodel.Pick.Cast(obj)
         if not pick:
             continue 
-        seiscomp.logging.debug(pick.publicID())
+        log.debug(pick.publicID())
         n, s, l, c = scstuff.util.nslc(pick)
         _st.append("%s.%s.%s" % (n, s, l))
         try:
@@ -104,6 +103,43 @@ def convertOriginFromPyocto(ievent, idx, pyocto_stations, pyocto_events, pyocto_
     return origin
 
 
+def createConstantVelocityModel(spec_string):
+    """
+    Create a constant-velocity model from a specification string in the format
+    vp, vs, rh
+    """
+    values = tuple(map(float, spec_string.split(",")))
+    if not 0 < len(values) < 4:
+        log.error("failed to parse single layer spec '%s'" % spec_string)
+        return False
+    vs = rh = None
+    if len(values) >= 1:
+        vp = values[0]
+    if len(values) >= 2:
+        vs = values[1]
+    if len(values) == 3:
+        rh = values[2]
+    if not vs:
+        vs = vp/(3**0.5)
+    if not rh:
+        # from Bertheussen, 1977
+        rh = 0.77 + 0.32*vp
+
+    log.debug("Using constant-velocity model with vp,vs,rh=%.3f,%.3f,%.3f" % (vp, vs, rh))
+    velocity_model = pyocto.VelocityModel0D(vp, vs, rh)
+    return velocity_model
+
+
+def createVelocityModelFromCSV(csv_filename):
+    # Read model from file (requires pyrocko!)
+    tmp_path = pathlib.Path("/tmp")
+    model_path = tmp_path / "model"
+    layers = pandas.read_csv(csv_filename)
+    pyocto.VelocityModel1D.create_model(layers, 1, self.max_distance, self.max_depth, model_path)
+    velocity_model = pyocto.VelocityModel1D(model_path, 2.0)
+    return velocity_model
+
+
 class Associator(pyocto.OctoAssociator):
 
     def __init__(self,
@@ -112,8 +148,8 @@ class Associator(pyocto.OctoAssociator):
             min_num_s_picks=0,
             min_num_p_and_s_picks=0,
             min_num_p_or_s_picks=4,
-            velocity_model_csv=None,
-            debug=False):
+            velocity_model=None,
+            debug_using_pyocto=False):
 
         self.center_lat = center_lat
         self.center_lon = center_lon
@@ -125,11 +161,11 @@ class Associator(pyocto.OctoAssociator):
         self.min_num_p_and_s_picks = min_num_p_and_s_picks
         self.min_num_p_or_s_picks = min_num_p_or_s_picks
 
-        velocity_model = self.setupVelocityModel(velocity_model_csv)
+        assert velocity_model is not None
 
-        self.debug = debug
+        self.debug_using_pyocto = debug_using_pyocto
 
-        seiscomp.logging.debug("Center latitude, longitude = %.3f, %.3f" % (center_lat, center_lon))
+        log.debug("Center latitude, longitude = %.3f, %.3f" % (center_lat, center_lon))
         crs_local = pyproj.CRS(proj='aeqd', lat_0=center_lat, lon_0=center_lon, datum='WGS84', type='crs')
 
         super().__init__(
@@ -145,7 +181,7 @@ class Associator(pyocto.OctoAssociator):
             pick_match_tolerance=3.0,
             crs=crs_local,)
 
-        if self.debug:
+        if self.debug_using_pyocto:
             debug_dir.mkdir(mode=0o755, parents=False, exist_ok=True)
 
         # This is a list of only network, station, location codes of the
@@ -156,8 +192,6 @@ class Associator(pyocto.OctoAssociator):
         # White list of accepted pick authors
         self.accepted_authors = ["scautopick"]
 
-        self._locatorInterface = seiscomp.seismology.LocatorInterface.Create("LOCSAT")
-
     def setPickAuthors(self, authors):
         """
         Set whitelist of accepted pick authors
@@ -165,7 +199,7 @@ class Associator(pyocto.OctoAssociator):
         self.accepted_authors = authors
 
     def convertInventoryToPyOcto(self, inventory, whitelist=None):
-        seiscomp.logging.debug("Preparing pyocto inventory")
+        log.debug("Preparing pyocto inventory")
         stations = pandas.core.frame.DataFrame()
 
         tmp = dict()
@@ -198,7 +232,7 @@ class Associator(pyocto.OctoAssociator):
         for n, s, l in tmp:
             latitude, longitude, elevation = tmp[n, s, l]
             _id = "%s.%s.%s" % (n, s, l)
-            seiscomp.logging.debug(_id)
+            log.debug(_id)
             _st.append(_id)
             _lat.append(latitude)
             _lon.append(longitude)
@@ -209,21 +243,12 @@ class Associator(pyocto.OctoAssociator):
         stations["elevation"] = _ele
 
         self.pyocto_stations = stations
-        if self.debug:
+        if self.debug_using_pyocto:
             self.pyocto_stations.to_parquet(debug_dir / "stations")
         self.transform_stations(self.pyocto_stations)
 
-    def setupVelocityModel(self, model_csv=None):
-        if model_csv:
-            # Read model from file (requires pyrocko!)
-            tmp_path = pathlib.Path("/tmp")
-            model_path = tmp_path / "model"
-            layers = pandas.read_csv(model_csv)
-            pyocto.VelocityModel1D.create_model(layers, 1, self.max_dist, self.max_depth, model_path)
-            velocity_model = pyocto.VelocityModel1D(model_path, 2.0)
-        else:
-            velocity_model = pyocto.VelocityModel0D(7.0, 4.0, 2.0)
-
+    def setupConstantVelocityModel(self, vp, vs, rh):
+        velocity_model = pyocto.VelocityModel0D(vp, vs, rh)
         return velocity_model
 
     def accepts(self, pick):
@@ -238,98 +263,33 @@ class Associator(pyocto.OctoAssociator):
 
         return True
 
-    def relocate(self, origin):
-        relocated = None
-        fixedDepth = None
-        minDepth = 1.
-
-        loc = self._locatorInterface
-
-        def deepCloneOrigin(origin):
-            cloned = seiscomp.datamodel.Origin.Cast(origin.clone())
-            for iarr in range(origin.arrivalCount()):
-                arr = seiscomp.datamodel.Arrival.Cast(origin.arrival(iarr).clone())
-                cloned.add(arr)
-            return cloned
-
-        origin = deepCloneOrigin(origin)
-
-        seiscomp.logging.debug("Before arrival loop")
-        for iarr in range(origin.arrivalCount()):
-            arr = origin.arrival(iarr)
-            arr.setWeight(1)
-            arr.setTimeUsed(True)
-        seiscomp.logging.debug("After  arrival loop")
-
-        while True:
-            if fixedDepth is None:
-                loc.useFixedDepth(False)
-                seiscomp.logging.info("Using free depth")
-            else:
-                loc.useFixedDepth(True)
-                loc.setFixedDepth(fixedDepth)
-                seiscomp.logging.info("Using fixed depth of %g km" % fixedDepth)
-
-            now = seiscomp.core.Time.GMT()
-
-            try:
-                relocated = loc.relocate(origin)
-                relocated = seiscomp.datamodel.Origin.Cast(relocated)
-                seiscomp.logging.debug("Relocation succeeded")
-            except RuntimeError:
-                relocated = None
-                seiscomp.logging.debug("Relocation failed")
-                
-            if relocated:
-                if fixedDepth is None:
-                    relocated.setDepthType(seiscomp.datamodel.FROM_LOCATION)
-                else:
-                    relocated.setDepthType(seiscomp.datamodel.OPERATOR_ASSIGNED)
-
-                if relocated.depth().value() < minDepth and fixedDepth is None:
-                    # Fix depth to minimum depth and relocate again
-                    fixedDepth = minDepth
-                    continue
-
-            break
-
-        if relocated:
-            try:
-                quality = relocated.originQuality()
-            except:
-                quality = seiscomp.datamodel.OriginQuality()
-            quality.setAssociatedPhaseCount(relocated.arrivalCount())
-            quality.setUsedPhaseCount(relocated.arrivalCount())
-            relocated.setQuality(quality)
-            return relocated
-
     def process(self, picks):
         filtered_picks = []
         for pick in picks:
             if not self.accepts(pick):
-                seiscomp.logging.debug("pick " + pick.publicID() + " rejected")
+                log.debug("pick " + pick.publicID() + " rejected")
                 continue
             filtered_picks.append(pick)
         if len(filtered_picks) < self.min_num_p_picks:
-            seiscomp.logging.debug("Too few picks left %d - stop" % (len(filtered_picks)))
+            log.debug("Too few picks left %d - stop" % (len(filtered_picks)))
             return []
 
         pyocto_picks = convertPicksToPyOcto(filtered_picks)
-        if self.debug:
+        if self.debug_using_pyocto:
             # This file can be used as input for @yetinam's PyOcto examples,
             # which may be useful for debugging.
             pyocto_picks.to_parquet(debug_dir / "picks")
 
-        seiscomp.logging.debug("Running associator")
+        log.debug("Running associator")
         t0 = time.time()
         pyocto_events, pyocto_assignments = \
             self.associate(pyocto_picks, self.pyocto_stations)
         if pyocto_events.empty:
-            seiscomp.logging.debug("No origins")
+            log.debug("No origins")
             return []
         t1 = time.time()
-        seiscomp.logging.debug("Association took %.3f seconds" % (t1-t0,))
-        seiscomp.logging.debug("Generated %d origins using %d picks" % (
+        log.debug("Association took %.3f seconds" % (t1-t0,))
+        log.debug("Generated %d origins using %d picks" % (
             len(pyocto_events), len(pyocto_assignments)))
 
         self.transform_events(pyocto_events)
@@ -345,16 +305,13 @@ class Associator(pyocto.OctoAssociator):
         del pyocto_assignments["pick_idx"]
         del pyocto_assignments["time"]
 
-        seiscomp.logging.debug("#### origins\n" + str(pyocto_events))
-        seiscomp.logging.debug("#### assignments\n" + str(pyocto_assignments))
+        log.debug("#### origins\n" + str(pyocto_events))
+        log.debug("#### assignments\n" + str(pyocto_assignments))
 
         origins = list()
         for ievent, idx in enumerate(pyocto_events["idx"]):
             origin = convertOriginFromPyocto(ievent, idx, self.pyocto_stations, pyocto_events, pyocto_assignments)
             origins.append(origin)
-            relocated = self.relocate(origin)
-            if relocated:
-                origins.append(relocated)
 
         return origins
 
