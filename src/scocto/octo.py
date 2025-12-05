@@ -11,7 +11,7 @@ import pyocto
 
 
 # Directory where debug data are written to
-debug_dir = pathlib.Path("debug")
+debug_data_dir = pathlib.Path("debug")
 
 
 def convertPicksToPyOcto(objects):
@@ -27,7 +27,6 @@ def convertPicksToPyOcto(objects):
         pick = seiscomp.datamodel.Pick.Cast(obj)
         if not pick:
             continue 
-        log.debug(pick.publicID())
         n, s, l, c = scstuff.util.nslc(pick)
         _st.append("%s.%s.%s" % (n, s, l))
         try:
@@ -149,7 +148,8 @@ class Associator(pyocto.OctoAssociator):
             min_num_p_and_s_picks=0,
             min_num_p_or_s_picks=4,
             velocity_model=None,
-            debug_using_pyocto=False):
+            debug_data_dir=None):
+        self.pick_match_tolerance = 6.
 
         self.center_lat = center_lat
         self.center_lon = center_lon
@@ -163,7 +163,7 @@ class Associator(pyocto.OctoAssociator):
 
         assert velocity_model is not None
 
-        self.debug_using_pyocto = debug_using_pyocto
+        self.enablePyOctoDebugOutput(debug_data_dir)
 
         log.debug("Center latitude, longitude = %.3f, %.3f" % (center_lat, center_lon))
         crs_local = pyproj.CRS(proj='aeqd', lat_0=center_lat, lon_0=center_lon, datum='WGS84', type='crs')
@@ -178,11 +178,8 @@ class Associator(pyocto.OctoAssociator):
             n_p_picks=self.min_num_p_picks,
             n_s_picks=self.min_num_s_picks,
             n_p_and_s_picks=self.min_num_p_and_s_picks,
-            pick_match_tolerance=3.0,
+            pick_match_tolerance=self.pick_match_tolerance,
             crs=crs_local,)
-
-        if self.debug_using_pyocto:
-            debug_dir.mkdir(mode=0o755, parents=False, exist_ok=True)
 
         # This is a list of only network, station, location codes of the
         # configured sensors, to avoid feeding picks for unconfigured
@@ -191,6 +188,13 @@ class Associator(pyocto.OctoAssociator):
 
         # White list of accepted pick authors
         self.accepted_authors = ["scautopick"]
+
+    def enablePyOctoDebugOutput(self, debug_data_dir):
+        self.debug_data_dir = debug_data_dir
+        if not self.debug_data_dir:
+            return
+        self.debug_data_dir = pathlib.Path(debug_data_dir)
+        self.debug_data_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
 
     def setPickAuthors(self, authors):
         """
@@ -243,8 +247,8 @@ class Associator(pyocto.OctoAssociator):
         stations["elevation"] = _ele
 
         self.pyocto_stations = stations
-        if self.debug_using_pyocto:
-            self.pyocto_stations.to_parquet(debug_dir / "stations")
+        if self.debug_data_dir:
+            self.pyocto_stations.to_parquet(self.debug_data_dir / "stations")
         self.transform_stations(self.pyocto_stations)
 
     def setupConstantVelocityModel(self, vp, vs, rh):
@@ -275,10 +279,10 @@ class Associator(pyocto.OctoAssociator):
             return []
 
         pyocto_picks = convertPicksToPyOcto(filtered_picks)
-        if self.debug_using_pyocto:
+        if self.debug_data_dir:
             # This file can be used as input for @yetinam's PyOcto examples,
             # which may be useful for debugging.
-            pyocto_picks.to_parquet(debug_dir / "picks")
+            pyocto_picks.to_parquet(self.debug_data_dir / "picks")
 
         log.debug("Running associator")
         t0 = time.time()
@@ -306,7 +310,6 @@ class Associator(pyocto.OctoAssociator):
         del pyocto_assignments["time"]
 
         log.debug("#### origins\n" + str(pyocto_events))
-        log.debug("#### assignments\n" + str(pyocto_assignments))
 
         origins = list()
         for ievent, idx in enumerate(pyocto_events["idx"]):

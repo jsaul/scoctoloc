@@ -68,12 +68,22 @@ The network center latitude and longitude define the projection center of out ne
 You can try it out like in the offline example above by simply adding the `--playback` option.
 
 
-# Tests
+## Usage
+
+### --processing-delay
+When processing incoming picks immediately, we process them normally in the order of the waves arriving at the stations of our network. First the P wave at the nearest station, then the P wave at the second-nearest station, perhaps followed by the S wave of the nearest station, then the P wave of the third-nearest station and so on. In other words we start with very few picks and add picks to the processing as they arrive, which depending on the size of the network may take anywhere from a few seconds to several minutes. Depending on the number of stations in the network, many origins would be generated if we update the solution for every additional pick associated. If desired, this is feasible, but it might fill the database with many unneeded origins, which were preferred origins for only a few seconds. We might as well accept a bit of a delay, collect more picks and process them all at once, resulting in the earliest origins being delayed.
+
+One strategy to control this behaviour is a processing delay. Picks are buffered for a configurable delay before they are processed, resulting in most if not all picks of an event to be available at the time of the processing, but also delayed availability of the solutions.
+
+
+
+
+## Tests
 
 Work in progress.
 
 
-# Issues
+## Issues
 
 * See [this issue on Github](https://github.com/yetinam/pyocto/issues/21).
   This is the reason why we have to `import pyrocko.modelling` before any SeisComP imports until a better solution is found.
