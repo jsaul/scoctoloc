@@ -12,6 +12,7 @@ import seiscomp.math
 import scstuff.util
 import scstuff.dbutil
 
+import numpy
 import pyocto
 import scocto.octo
 import scocto.util
@@ -554,8 +555,28 @@ class App(seiscomp.client.Application):
                 quality = relocated.originQuality()
             except:
                 quality = seiscomp.datamodel.OriginQuality()
-            quality.setAssociatedPhaseCount(relocated.arrivalCount())
-            quality.setUsedPhaseCount(relocated.arrivalCount())
+
+            residuals = []
+            distances = []
+            associatedPhaseCount = 0
+            usedPhaseCount = 0
+            for i in range(relocated.arrivalCount()):
+                arrival = relocated.arrival(i)
+                residual = arrival.timeResidual()
+                residuals.append(residual)
+                distance = arrival.distance()
+                distances.append(distance)
+                if arrival.timeUsed():
+                    usedPhaseCount += 1
+                associatedPhaseCount += 1
+            rms = numpy.sqrt(sum(numpy.array(residuals) ** 2)/len(residuals))
+            quality.setStandardError(rms)
+            quality.setAssociatedPhaseCount(associatedPhaseCount)
+            quality.setUsedPhaseCount(usedPhaseCount)
+            distances.sort()
+            quality.setMinimumDistance(distances[0])
+            quality.setMaximumDistance(distances[-1])
+            quality.setMedianDistance(numpy.median(distances))
             relocated.setQuality(quality)
             return relocated
 
