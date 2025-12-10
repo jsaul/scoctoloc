@@ -37,7 +37,7 @@ class MyEvent:
         # The currently preferred origin; usually self.origins[-1]
         self.preferredOrigin = None
 
-        self.last_published = False
+        self.lastPublished = False
 
     def set_origin(self, origin, picks):
         method = origin.methodID()
@@ -176,20 +176,20 @@ class App(seiscomp.client.Application):
         self.setLoadInventoryEnabled(True)
 
         self.picks = dict()
-        self.sorted_picks = list()
+        self.sortedPicks = list()
 
-        self.offline_buffer = list()
+        self.offlineBuffer = list()
 
         self.inventory_xml = None
-        self.model_csv = None
-        self.model_const = None
+        self.modelCSV = None
+        self.modelConst = None
         self.test = False
-        self.origin_count = 0
         self.center_latlon = None
-        self.max_distance = 500.
-        self.max_depth = 100.
 
-        self.processing_mode = "online"
+        self.maxDistance = 300.
+        self.maxDepth = 100.
+
+        self.processingMode = "online"
 
         self._locator_name = "LOCSAT"
 
@@ -226,8 +226,9 @@ class App(seiscomp.client.Application):
         self.commandline().addStringOption("Config", "pick-authors", "specify list of allowed pick authors")
         self.commandline().addStringOption("Config", "whitelist", "specify stream whitelist")
         self.commandline().addStringOption("Config", "center-latlon", "specify network center lat,lon")
-        self.commandline().addStringOption("Config", "max-distance", "specify network radius from center lat,lon")
-        self.commandline().addStringOption("Config", "max-depth", "specify max. hypocenter depth in km")
+        self.commandline().addDoubleOption("Config", "max-distance", "specify network radius from center lat,lon")
+        self.commandline().addDoubleOption("Config", "max-depth", "specify max. hypocenter depth in km")
+        self.commandline().addDoubleOption("Config", "pick-delay", "specify pick processing delay in seconds (experimental)")
         self.commandline().addStringOption("Config", "locator", "specify locator (default is LOCSAT)")
         self.commandline().addOption("Config", "test", "test mode - no results are sent to messaging")
         self.commandline().addOption("Config", "debug-data-dir", "specify folder to dump input for debugging in PyOcto (off by default)")
@@ -260,30 +261,30 @@ class App(seiscomp.client.Application):
         # Associator config
 
         try:
-            center = self.configGetStrings("scoctoloc.center")
+            center = self.configGetStrings("scoctoloc.network.center")
             assert len(center) == 2
             self.center_latlon = tuple(map(float, center))
         except RuntimeError:
             pass
 
         try:
-            self.model_csv = self.configGetString("scoctoloc.octo.model.csv")
-        except RuntimeError:
-            self.model_csv = None
-
-        try:
-            # Constant-velocity, single layer
-            self.model_const = self.configGetString("scoctoloc.octo.model.const")
-        except RuntimeError:
-            self.model_const = None
-
-        try:
-            self.max_distance = self.configGetDouble("scoctoloc.maxDistance")
+            self.maxDistance = self.configGetDouble("scoctoloc.network.radius")
         except RuntimeError:
             pass
 
         try:
-            self.max_depth = self.configGetString("scoctoloc.maxDepth")
+            self.modelCSV = self.configGetString("scoctoloc.octo.model.csv")
+        except RuntimeError:
+            self.modelCSV = None
+
+        try:
+            # Constant-velocity, single layer
+            self.modelConst = self.configGetString("scoctoloc.octo.model.const")
+        except RuntimeError:
+            self.modelConst = None
+
+        try:
+            self.maxDepth = self.configGetString("scoctoloc.maxDepth")
         except RuntimeError:
             pass
 
@@ -304,6 +305,11 @@ class App(seiscomp.client.Application):
 
         try:
             self.min_num_p_or_s_picks = self.configGetInt("scoctoloc.minPickCountPOrS")
+        except RuntimeError:
+            pass
+
+        try:
+            self.pick_delay = self.configGetDouble("scoctoloc.pickDelay")
         except RuntimeError:
             pass
 
@@ -338,7 +344,7 @@ class App(seiscomp.client.Application):
                 self.setMessagingEnabled(True)
 
         if self.commandline().hasOption("playback"):
-            self.processing_mode = "playback"
+            self.processingMode = "playback"
         else:
             pass
 
@@ -363,13 +369,13 @@ class App(seiscomp.client.Application):
             self.output_xml = "-"
 
         try:
-            self.model_csv = self.commandline().optionString("model-csv")
+            self.modelCSV = self.commandline().optionString("model-csv")
         except RuntimeError:
             pass
 
         try:
             # Constant-velocity, single layer
-            self.model_const = self.commandline().optionString("model-const")
+            self.modelConst = self.commandline().optionString("model-const")
         except RuntimeError:
             pass
 
@@ -380,19 +386,23 @@ class App(seiscomp.client.Application):
             self.center_latlon = None
 
         try:
-            tmp = self.commandline().optionString("max-distance")
-            self.max_distance = float(tmp)
+            self.maxDistance = self.commandline().optionDouble("max-distance")
         except RuntimeError:
-            self.max_distance = 500.
+            pass
 
         try:
-            tmp = self.commandline().optionString("max-depth")
-            self.max_depth = float(tmp)
+            self.maxDepth = self.commandline().optionDouble("max-depth")
         except RuntimeError:
-            self.max_depth = 100.
+            pass
 
         if self.commandline().hasOption("use-pick-time"):
             self.use_pick_time = True
+
+        try:
+            tmp = self.commandline().optionString("pick-delay")
+            self.pick_delay = float(tmp)
+        except RuntimeError:
+            pass
 
         try:
             self.pick_authors = self.commandline().optionString("pick-authors").replace(",", " ").split()
@@ -474,13 +484,13 @@ class App(seiscomp.client.Application):
         seiscomp.logging.debug("Setting up associator")
         associator = scocto.octo.Associator(
                 center_lat, center_lon,
-                max_dist=self.max_distance,
-                max_depth=self.max_depth,
+                max_dist=self.maxDistance,
+                max_depth=self.maxDepth,
                 min_num_p_picks=self.min_num_p_picks,
                 min_num_s_picks=self.min_num_s_picks,
                 min_num_p_and_s_picks=self.min_num_p_and_s_picks,
                 min_num_p_or_s_picks=self.min_num_p_or_s_picks,
-                velocity_model=self.velocity_model,
+                velocity_model=self.velocityModel,
                 debug_data_dir=self.debug_data_dir)
         associator.setInventory(self.inventory)
         associator.setPickAuthors(self.pick_authors)
@@ -538,6 +548,11 @@ class App(seiscomp.client.Application):
                 seiscomp.logging.debug("Relocation failed")
 
             if relocated:
+                try:
+                    quality = relocated.originQuality()
+                except:
+                    quality = seiscomp.datamodel.OriginQuality()
+
                 if fixedDepth is None:
                     relocated.setDepthType(seiscomp.datamodel.FROM_LOCATION)
                 else:
@@ -611,7 +626,7 @@ class App(seiscomp.client.Application):
         - Write back EventParameters to file
         - done
         """
-        origins = self.process(self.offline_buffer)
+        origins = self.process(self.offlineBuffer)
 
         self.relocateOrigins(origins)
 
@@ -654,12 +669,12 @@ class App(seiscomp.client.Application):
         objectTime = scocto.util.pickTime if self.use_pick_time else scocto.util.creationTime
 
         # Sort objects by creation time
-        self.offline_buffer.sort(key=lambda x: objectTime(x))
+        self.offlineBuffer.sort(key=lambda x: objectTime(x))
 
-        for pick in self.offline_buffer:
+        for pick in self.offlineBuffer:
             seiscomp.logging.debug(pick.publicID())
 
-        for obj in self.offline_buffer:
+        for obj in self.offlineBuffer:
             self.addObject("", obj)
 
         # Process any remaining picks
@@ -682,15 +697,15 @@ class App(seiscomp.client.Application):
         if self.center_latlon is None:
             raise RuntimeError("Must specify center-latlon")
 
-        if self.model_csv:
-            if self.model_const:
+        if self.modelCSV:
+            if self.modelConst:
                 raise RuntimeError("Cannot use two velocity models at the same time!")
-            self.velocity_model = scocto.octo.createVelocityModelFromCSV(self.model_csv)
-        elif self.model_const:
-            self.velocity_model = scocto.octo.createConstantVelocityModel(self.model_const)
+            self.velocityModel = scocto.octo.createVelocityModelFromCSV(self.modelCSV)
+        elif self.modelConst:
+            self.velocityModel = scocto.octo.createConstantVelocityModel(self.modelConst)
         else:
             seiscomp.logging.warning("Using default constant-velocity model with vp,vs,rh=7,4,2")
-            self.velocity_model = pyocto.VelocityModel0D(7, 4, 2)
+            self.velocityModel = pyocto.VelocityModel0D(7, 4, 2)
 
         self.setupStreamWhitelist()
         self.setupInventory()
@@ -739,7 +754,7 @@ class App(seiscomp.client.Application):
         """
         objects = self.loadInputData()
 
-        self.offline_buffer = objects
+        self.offlineBuffer = objects
 
     def run(self):
         """
@@ -750,21 +765,21 @@ class App(seiscomp.client.Application):
         - hand over to Application.run() and collect new objects via addObject()
         """
 
-        seiscomp.logging.debug("Running in " + self.processing_mode + " mode")
+        seiscomp.logging.debug("Running in " + self.processingMode + " mode")
 
-        if self.processing_mode != "online":
+        if self.processingMode != "online":
             self.prepareOfflineRun()
 
-            if not self.offline_buffer:
+            if not self.offlineBuffer:
                 seiscomp.logging.error("No objects read!")
                 return False
 
-            if self.processing_mode == "playback":
+            if self.processingMode == "playback":
                 return self.runPlayback()
-            elif self.processing_mode == "offline":
+            elif self.processingMode == "offline":
                 return self.runOffline()
             else:
-                seiscomp.logging.error("Wrong processing mode " + self.processing_mode)
+                seiscomp.logging.error("Wrong processing mode " + self.processingMode)
                 return False
 
 
@@ -816,12 +831,12 @@ class App(seiscomp.client.Application):
 
     def storePick(self, pick):
         self.picks[pick.publicID()] = pick
-        self.sorted_picks.append(pick)
+        self.sortedPicks.append(pick)
         objectTime = scocto.util.pickTime
-        self.sorted_picks.sort(key=lambda x: objectTime(x))
+        self.sortedPicks.sort(key=lambda x: objectTime(x))
         self.pick_queue.append(pick)
 
-        if self.processing_mode == "playback":
+        if self.processingMode == "playback":
             pickCreationTime = scocto.util.creationTime(pick)
             if self.playbackTime is None:
                 self.playbackTime = pickCreationTime
@@ -831,7 +846,7 @@ class App(seiscomp.client.Application):
         return True
 
     def now(self):
-        if self.processing_mode == "online":
+        if self.processingMode == "online":
             return seiscomp.core.Time.UTC()
         else:
             return self.playbackTime
@@ -852,7 +867,7 @@ class App(seiscomp.client.Application):
 
     def processPick(self, new_pick):
         seiscomp.logging.info("Processing pick " + new_pick.publicID())
-        if self.processing_mode == "playback":
+        if self.processingMode == "playback":
             tstr = scocto.util.time2str(scocto.util.creationTime(new_pick))
             seiscomp.logging.debug("Playback time is " + tstr)
 
@@ -861,7 +876,7 @@ class App(seiscomp.client.Application):
         tmin = new_pick.time().value() - dt
         tmax = new_pick.time().value() + dt
         time = scocto.util.pickTime
-        picks = [p for p in self.sorted_picks if tmin < time(p) < tmax]
+        picks = [p for p in self.sortedPicks if tmin < time(p) < tmax]
 
         # debugging only
         if len(picks) > 1:
@@ -902,7 +917,7 @@ class App(seiscomp.client.Application):
 
         for origin in origins:
             seiscomp.logging.debug("new origin " + origin.publicID())
-            s = scocto.util.printOrigin(origin, self.sorted_picks)
+            s = scocto.util.printOrigin(origin, self.sortedPicks)
             seiscomp.logging.info(s)
 
             matching_event = self.event_list.find_matching_event(origin)
@@ -926,7 +941,7 @@ class App(seiscomp.client.Application):
 
             matching_event.set_origin(origin, self.picks)
 
-            if matching_event.last_published:
+            if matching_event.lastPublished:
                 pass
 
         for discarded_origin in discarded_origins:
@@ -938,12 +953,13 @@ class App(seiscomp.client.Application):
                 origin.setPublicID(newPublicID)
             now = self.now()
             ci = seiscomp.datamodel.CreationInfo()
-            ci.setAgencyID("GFZ")
+            ci.setAgencyID(self.agencyID())
             ci.setAuthor("scoctoloc")
             ci.setCreationTime(now)
             origin.setCreationInfo(ci)
+            origin.setEvaluationMode(seiscomp.datamodel.AUTOMATIC)
 
-        if self.processing_mode == "playback":
+        if self.processingMode == "playback":
             for origin in origins:
                 self.ep.add(origin)
         else:
@@ -954,7 +970,7 @@ class App(seiscomp.client.Application):
             msg = seiscomp.datamodel.Notifier.GetMessage()
             seiscomp.datamodel.Notifier.Disable()
 
-        if self.processing_mode != "online" or self.commandline().hasOption("test"):
+        if self.processingMode != "online" or self.commandline().hasOption("test"):
             for origin in origins:
                 seiscomp.logging.info("test/offline/playback mode - not sending " + origin.publicID())
         else:
