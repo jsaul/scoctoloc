@@ -665,6 +665,13 @@ class App(seiscomp.client.Application):
         # Process any remaining picks
         self.processPickQueue()
 
+        seiscomp.logging.debug("Writing output to %s" % self.output_xml)
+        ar = seiscomp.io.XMLArchive()
+        ar.setFormattedOutput(True)
+        ar.create(self.output_xml)
+        ar.writeObject(self.ep)
+        ar.close()
+
         return True
 
     def init(self):
@@ -936,7 +943,10 @@ class App(seiscomp.client.Application):
             ci.setCreationTime(now)
             origin.setCreationInfo(ci)
 
-        if self.processing_mode != "playback":
+        if self.processing_mode == "playback":
+            for origin in origins:
+                self.ep.add(origin)
+        else:
             ep = seiscomp.datamodel.EventParameters()
             seiscomp.datamodel.Notifier.Enable()
             for origin in origins:
