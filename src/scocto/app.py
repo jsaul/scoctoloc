@@ -32,11 +32,6 @@ import scocto.util
 import scocto.whitelist
 
 
-def creationTime(obj):
-    """ For readability """
-    return obj.creationInfo().creationTime()
-
-
 class MyEvent:
     # Used here locally to associate origins of the same event
     # and to remember the publication history.
@@ -62,88 +57,6 @@ class MyEvent:
             self.picks[arr.pickID()] = picks[arr.pickID()]
 
 
-def origin_distance_km(origin1, origin2):
-    lat1 = origin1.latitude().value()
-    lat2 = origin2.latitude().value()
-    lon1 = origin1.longitude().value()
-    lon2 = origin2.longitude().value()
-    dep1 = origin1.depth().value()
-    dep2 = origin2.depth().value()
-    delta, az, baz = seiscomp.math.delazi_wgs84(lat1, lon1, lat2, lon2)
-    delta_km = delta*111.195
-    dist_km = (delta_km**2 + (dep2-dep1)**2)**0.5
-    return dist_km
-
-
-def origin_time_separation(origin1, origin2):
-    dt = float(origin2.time().value() - origin1.time().value())
-    return abs(dt)
-
-
-def PublicObjectCast(obj):
-    for tp in [
-        seiscomp.datamodel.Amplitude,
-        seiscomp.datamodel.Pick,
-        seiscomp.datamodel.Magnitude,
-        seiscomp.datamodel.Origin,
-        seiscomp.datamodel.FocalMechanism,
-        seiscomp.datamodel.Event
-        ]:
-        typedObject = tp.Cast(obj)
-        if typedObject:
-            return typedObject
-    return obj
-
-
-def compareOrigins(a, b):
-    """
-    Compare origin a and b in terms of referenced picks.
-
-    Returns either 0 (no improvement) or 1 (improvement)
-    """
-    pick_ids_a = list()
-    pick_ids_b = list()
-
-    for i in range(a.arrivalCount()):
-        arr = a.arrival(i)
-        pick_ids_a.append(arr.pickID())
-    for i in range(b.arrivalCount()):
-        arr = b.arrival(i)
-        pick_ids_b.append(arr.pickID())
-
-    pick_ids_a.sort()
-    pick_ids_b.sort()
-    if pick_ids_a == pick_ids_b:
-        return 0
-
-    common_pick_count = 0
-    for pick_id in pick_ids_a:
-        if pick_id in pick_ids_b:
-            common_pick_count += 1
-    if not common_pick_count:
-        return -1
-
-    if common_pick_count == len(pick_ids_a):
-        if len(pick_ids_b) > len(pick_ids_a):
-            return 1
-        else:
-            return 0
-
-    if len(pick_ids_b) > len(pick_ids_a):
-        return 1
-    if len(pick_ids_b) < len(pick_ids_a):
-        return -1
-
-    seiscomp.logging.warning("Same number of picks but not same picks")
-    for pick_id in pick_ids_a:
-        if pick_id not in pick_ids_b:
-            seiscomp.logging.warning("Pick in A not B: " + pick_id)
-    for pick_id in pick_ids_b:
-        if pick_id not in pick_ids_a:
-            seiscomp.logging.warning("Pick in B not A: " + pick_id)
-    return -1
-
-
 class MyEventList(list):
 
     def find_matching_event(self, origin):
@@ -161,8 +74,8 @@ class MyEventList(list):
                 continue
 
             last = event.origins[method][-1]
-            if origin_time_separation(last, origin) < 30 and \
-               origin_distance_km(last, origin) < 100:
+            if scocto.util.originTimeSeparation(last, origin) < 30 and \
+               scocto.util.originDistanceKm(last, origin) < 100:
 
                 common_pick_count = 0
 
@@ -963,7 +876,7 @@ class App(seiscomp.client.Application):
             if matching_event:
                 seiscomp.logging.debug("matching event found")
                 last = matching_event.origins[method][-1]
-                if compareOrigins(last, origin) > 0:
+                if scocto.util.compareOrigins(last, origin) > 0:
                     seiscomp.logging.debug("improvement: %d -> %d" % (last.arrivalCount(), origin.arrivalCount()))
                 else:
                     seiscomp.logging.debug("no improvement - skipping origin")
