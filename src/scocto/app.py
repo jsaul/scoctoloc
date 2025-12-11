@@ -180,7 +180,7 @@ class App(seiscomp.client.Application):
 
         self.offlineBuffer = list()
 
-        self.inventory_xml = None
+        self.inventoryXML = None
         self.modelCSV = None
         self.modelConst = None
         self.test = False
@@ -192,18 +192,19 @@ class App(seiscomp.client.Application):
 
         self.processingMode = "online"
 
-        self._locator_name = "LOCSAT"
+        self.locatorName = "LOCSAT"
 
         self.min_num_p_picks = 4
-        self.min_num_s_picks = 0
-        self.min_num_p_and_s_picks = 0
+        self.min_num_s_picks = 1
+        self.min_num_p_and_s_picks = 1
         self.min_num_p_or_s_picks = 4
 
         self.want_raw_pyocto_locations = False
 
         self.use_pick_time = False
         self.target_messaging_group = "LOCATION"
-        self.pick_authors = ["scautopick*"]
+
+        self.pick_authors = None
 
         self.pick_queue = list()
         self.pick_delay = 0
@@ -323,7 +324,7 @@ class App(seiscomp.client.Application):
         # Locator config
 
         try:
-            self._locator_name = self.configGetString("scoctoloc.locator")
+            self.locatorName = self.configGetString("scoctoloc.locator")
         except RuntimeError:
             pass
 
@@ -356,24 +357,24 @@ class App(seiscomp.client.Application):
             pass
 
         try:
-            self._locator_name = self.commandline().optionString("locator")
+            self.locatorName = self.commandline().optionString("locator")
         except RuntimeError:
             pass
 
         try:
-            self.input_xml = self.commandline().optionString("input-xml")
+            self.inputXML = self.commandline().optionString("input-xml")
         except RuntimeError:
-            self.input_xml = None
+            self.inputXML = None
 
         try:
-            self.inventory_xml = self.commandline().optionString("inventory-xml")
+            self.inventoryXML = self.commandline().optionString("inventory-xml")
         except RuntimeError:
-            self.inventory_xml = None
+            self.inventoryXML = None
 
         try:
-            self.output_xml = self.commandline().optionString("output-xml")
+            self.outputXML = self.commandline().optionString("output-xml")
         except RuntimeError:
-            self.output_xml = "-"
+            self.outputXML = "-"
 
         try:
             self.modelCSV = self.commandline().optionString("model-csv")
@@ -427,13 +428,13 @@ class App(seiscomp.client.Application):
             self.output_schedule = []
 
         try:
-            start_time = self.commandline().optionString("start-time")
-            end_time = self.commandline().optionString("end-time")
+            startTime = self.commandline().optionString("start-time")
+            endTime = self.commandline().optionString("end-time")
 
-            self.start_time = scstuff.util.parseTime(start_time)
-            self.end_time = scstuff.util.parseTime(end_time)
+            self.startTime = scstuff.util.parseTime(startTime)
+            self.endTime = scstuff.util.parseTime(endTime)
         except RuntimeError:
-            self.start_time = self.end_time = None
+            self.startTime = self.endTime = None
 
         if self.commandline().hasOption("pyocto-locations"):
             self.want_raw_pyocto_locations = True
@@ -459,15 +460,15 @@ class App(seiscomp.client.Application):
 
         Returns True if successful, False otherwise.
         """
-        if self.inventory_xml:
-            self.inventory = scocto.util.readInventoryFromXML(self.inventory_xml)
+        if self.inventoryXML:
+            self.inventory = scocto.util.readInventoryFromXML(self.inventoryXML)
         else:
             self.inventory = seiscomp.client.Inventory.Instance().inventory()
 
         return True
 
     def setupMessagingAndDatabase(self):
-        if self.input_xml:
+        if self.inputXML:
             self.setDatabaseEnabled(False, False)
             self.setMessagingEnabled(False)
         else:
@@ -646,10 +647,10 @@ class App(seiscomp.client.Application):
         for origin in origins:
             ep.add(origin)
 
-        seiscomp.logging.debug("Writing output to %s" % self.output_xml)
+        seiscomp.logging.debug("Writing output to %s" % self.outputXML)
         ar = seiscomp.io.XMLArchive()
         ar.setFormattedOutput(True)
-        ar.create(self.output_xml)
+        ar.create(self.outputXML)
         ar.writeObject(ep)
         ar.close()
 
@@ -692,10 +693,10 @@ class App(seiscomp.client.Application):
         # Process any remaining picks
         self.processPickQueue()
 
-        seiscomp.logging.debug("Writing output to %s" % self.output_xml)
+        seiscomp.logging.debug("Writing output to %s" % self.outputXML)
         ar = seiscomp.io.XMLArchive()
         ar.setFormattedOutput(True)
-        ar.create(self.output_xml)
+        ar.create(self.outputXML)
         ar.writeObject(self.ep)
         ar.close()
 
@@ -723,7 +724,7 @@ class App(seiscomp.client.Application):
         self.setupInventory()
         self.setupAssociators()
 
-        self.setupLocator(self._locator_name)
+        self.setupLocator(self.locatorName)
 
         return True
 
@@ -735,19 +736,19 @@ class App(seiscomp.client.Application):
         objects are received from the messaging via addObject().
         """
 
-        if self.input_xml and self.inventory_xml:
-            self.ep = scocto.util.readEventParametersFromXML(self.input_xml)
+        if self.inputXML and self.inventoryXML:
+            self.ep = scocto.util.readEventParametersFromXML(self.inputXML)
             objects = dict()
             for obj in scstuff.util.EventParametersPicks(self.ep):
                 pick = seiscomp.datamodel.Pick.Cast(obj)
-                if self.start_time is not None and self.end_time is not None:
-                    if not self.start_time <= scocto.util.pickTime(pick) <= self.end_time:
+                if self.startTime is not None and self.endTime is not None:
+                    if not self.startTime <= scocto.util.pickTime(pick) <= self.endTime:
                         continue
                 objects[obj.publicID()] = pick
-        elif self.start_time is not None and self.end_time is not None:
+        elif self.startTime is not None and self.endTime is not None:
             # database query in online mode, no EventParameters to read from/write to
             self.ep = seiscomp.datamodel.EventParameters()
-            objects = scstuff.dbutil.loadPicksForTimespan(self.query(), self.start_time, self.end_time)
+            objects = scstuff.dbutil.loadPicksForTimespan(self.query(), self.startTime, self.endTime)
             for key in objects:
                 obj = objects[key]
                 if obj:
@@ -801,7 +802,13 @@ class App(seiscomp.client.Application):
         return super().run()
 
     def checkPickAuthor(self, pick):
-        # Author check
+        """
+        Author check against the specified list of pick authors.
+
+        If this list was not specified, all picks with pass this check.
+        """
+        if not self.pick_authors:
+            return True
         matches = False
         pick_author = pick.creationInfo().author()
         for allowed_pick_author in self.pick_authors:
@@ -966,7 +973,7 @@ class App(seiscomp.client.Application):
             now = self.now()
             ci = seiscomp.datamodel.CreationInfo()
             ci.setAgencyID(self.agencyID())
-            ci.setAuthor("scoctoloc")
+            ci.setAuthor(self.author())
             ci.setCreationTime(now)
             origin.setCreationInfo(ci)
             origin.setEvaluationMode(seiscomp.datamodel.AUTOMATIC)
