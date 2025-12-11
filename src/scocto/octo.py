@@ -19,8 +19,7 @@ import pathlib
 import pandas
 import seiscomp.logging as log
 import seiscomp.datamodel
-import scstuff.util
-import scstuff.inventory
+import scocto.util
 import pyproj
 import pyocto
 
@@ -42,7 +41,7 @@ def convertPicksToPyOcto(objects):
         pick = seiscomp.datamodel.Pick.Cast(obj)
         if not pick:
             continue 
-        n, s, l, c = scstuff.util.nslc(pick)
+        n, s, l, c = scocto.util.nslc(pick)
         _st.append("%s.%s.%s" % (n, s, l))
         try:
             ph = str(pick.phaseHint().code())
@@ -51,7 +50,7 @@ def convertPicksToPyOcto(objects):
         if not ph:
             ph = "P"
         _ph.append(ph)
-        tm = scstuff.util.format_time(pick.time().value())
+        tm = scocto.util.time2str(pick.time().value())
         tm = pandas.Timestamp(tm)
         _tm.append(tm)
         _ev.append(0)
@@ -223,7 +222,7 @@ class Associator(pyocto.OctoAssociator):
         stations = pandas.core.frame.DataFrame()
 
         tmp = dict()
-        for item in scstuff.inventory.InventoryIterator(inventory):
+        for item in scocto.util.InventoryIterator(inventory):
             network, station, location, stream = item
             n, s, l = network.code(), station.code(), location.code()
             # Only keep the stations matching the whitelist

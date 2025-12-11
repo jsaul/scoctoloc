@@ -13,7 +13,7 @@
 # https://www.gnu.org/licenses/agpl-3.0.html.                             #
 ###########################################################################
 
-import scstuff.util
+import scocto.util
 import fnmatch
 
 class StreamWhitelist(list):
@@ -37,7 +37,7 @@ class StreamWhitelist(list):
                 self.append(".".join(line))
 
     def matches(self, stream_id):
-        n, s, l, c = scstuff.util.nslc(stream_id)
+        n, s, l, c = scocto.util.nslc(stream_id)
         if l == "":
             l = "--"
         stream_id = "%s.%s.%s.%s" % (n, s, l, c)

@@ -24,8 +24,6 @@ import seiscomp.seismology
 import seiscomp.io
 import seiscomp.logging
 import seiscomp.math
-import scstuff.util
-import scstuff.dbutil
 
 import numpy
 import pyocto
@@ -446,8 +444,8 @@ class App(seiscomp.client.Application):
             startTime = self.commandline().optionString("start-time")
             endTime = self.commandline().optionString("end-time")
 
-            self.startTime = scstuff.util.parseTime(startTime)
-            self.endTime = scstuff.util.parseTime(endTime)
+            self.startTime = scocto.util.parseTime(startTime)
+            self.endTime   = scocto.util.parseTime(endTime)
         except RuntimeError:
             self.startTime = self.endTime = None
 
@@ -758,7 +756,7 @@ class App(seiscomp.client.Application):
         if self.inputXML and self.inventoryXML:
             self.ep = scocto.util.readEventParametersFromXML(self.inputXML)
             objects = dict()
-            for obj in scstuff.util.EventParametersPicks(self.ep):
+            for obj in scocto.util.EventParametersPicks(self.ep):
                 pick = seiscomp.datamodel.Pick.Cast(obj)
                 if self.startTime is not None and self.endTime is not None:
                     if not self.startTime <= scocto.util.pickTime(pick) <= self.endTime:
@@ -767,7 +765,7 @@ class App(seiscomp.client.Application):
         elif self.startTime is not None and self.endTime is not None:
             # database query in online mode, no EventParameters to read from/write to
             self.ep = seiscomp.datamodel.EventParameters()
-            objects = scstuff.dbutil.loadPicksForTimespan(self.query(), self.startTime, self.endTime)
+            objects = scocto.util.loadPicksForTimespan(self.query(), self.startTime, self.endTime)
             for key in objects:
                 obj = objects[key]
                 if obj:

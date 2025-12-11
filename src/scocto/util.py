@@ -15,16 +15,15 @@
 
 import seiscomp.datamodel
 import seiscomp.io
-import scstuff.util
 import math
 import numpy
 
 
-def time2str(time):
+def time2str(time, digits=3):
     """
     Convert a seiscomp.core.Time to a string
     """
-    return time.toString("%Y-%m-%d %H:%M:%S.%f000000")[:21]
+    return time.toString("%Y-%m-%d %H:%M:%S.%f000000")[:20+digits].strip(".")
 
 
 def lat2str(lat):
@@ -45,6 +44,14 @@ def lon2str(lon):
     return s
 
 
+def parseTime(s):
+    for fmtstr in "%FT%TZ", "%FT%T.%fZ", "%F %T", "%F %T.%f":
+        t = seiscomp.core.Time.GMT()
+        if t.fromString(s, fmtstr):
+            return t
+    raise ValueError("could not parse time string '%s'" %s)
+
+
 def creationTime(obj):
     """ For readability """
     return obj.creationInfo().creationTime()
@@ -53,6 +60,21 @@ def creationTime(obj):
 def pickTime(pick):
     """ For readability """
     return pick.time().value()
+
+
+def nslc(obj):
+    """
+    Convenience function to retrieve network, station, location and
+    channel codes from a waveformID object and return them as tuple
+    """
+    if isinstance(obj, seiscomp.datamodel.WaveformStreamID):
+        n = obj.networkCode()
+        s = obj.stationCode()
+        l = obj.locationCode()
+        c = obj.channelCode()
+    else:
+        return nslc(obj.waveformID())
+    return n, s, l, c
 
 
 def sortedArrivals(origin):
@@ -90,7 +112,7 @@ def printOrigin(origin, picks):
 
     for arr in sortedArrivals(origin):
         pick = picks[arr.pickID()]
-        n, s, l, c = scstuff.util.nslc(pick.waveformID())
+        n, s, l, c = nslc(pick.waveformID())
         p = arr.phase().code()
         d = arr.distance()
         a = arr.azimuth()
@@ -134,6 +156,7 @@ def sumOfLargestGaps(azi, n=2):
     gap = sorted(gap, reverse=True)
     return sum(gap[0:n])
 
+
 def azimuths(origin, maxDelta=180, minWeight=0.5):
     """
     Returns a sorted list of azimuths for all arrivals within
@@ -157,6 +180,7 @@ def azimuths(origin, maxDelta=180, minWeight=0.5):
                 azi.append(azimuth)
     return sorted(azi)
 
+
 def computeAzimuthalGap(origin, maxDelta=180, minWeight=0.5):
     """
     Compute the largest azimuthal gap
@@ -170,6 +194,7 @@ def computeAzimuthalGap(origin, maxDelta=180, minWeight=0.5):
     azi = numpy.array(azi)
     gap = azi[1:] - azi[:-1]
     return max(gap)
+
 
 def computeSecondaryAzimuthalGap(origin, maxDelta=180, minWeight=0.5):
     """
@@ -186,6 +211,7 @@ def computeSecondaryAzimuthalGap(origin, maxDelta=180, minWeight=0.5):
     gap = azi[1:] - azi[:-1]
     sgap = gap[1:] + gap[:-1]
     return max(sgap)
+
 
 def computeTGap(origin, maxDelta=180, minWeight=0.5):
     """
@@ -213,6 +239,7 @@ def readEventParametersFromXML(xml):
 
     return ep
 
+
 def readInventoryFromXML(xml):
     seiscomp.logging.debug("Reading inventory from " + xml)
 
@@ -226,3 +253,105 @@ def readInventoryFromXML(xml):
     if inventory is None:
         raise TypeError(xml + ": no inventory found")
     return inventory
+
+
+def filterObjects(objects, authorWhitelist=None, agencyWhitelist=None):
+
+    def inrange(obj):
+        try:
+            c = obj.creationInfo()
+        except ValueError:
+            return False
+    
+        if authorWhitelist is not None and c.author() not in authorWhitelist:
+            return False
+
+        if agencyWhitelist is not None and c.agencyID() not in agencyWhitelist:
+            return False
+
+        return True
+
+    def inrange_dict(item):
+        key, obj = item
+        return inrange(obj)
+
+    def inrange_list(item):
+        return inrange(item)
+
+    if isinstance(objects, dict):
+        filtered = filter(inrange_dict, objects.items())
+    else:
+        filtered = filter(inrange_list, objects)
+
+    return type(objects)(filtered)
+
+
+def loadPicksForTimespan(
+    query, startTime, endTime, authors=None):
+    """
+    Load from the database all picks within the given time span. If specified,
+    also all amplitudes that reference any of these picks may be returned.
+    """
+
+    seiscomp.logging.debug("loading picks for %s ... %s" % (
+        time2str(startTime), time2str(endTime)))
+
+    if authors:
+        seiscomp.logging.debug("using author whitelist: " + str(", ".join(authors)))
+
+    objects = dict()
+
+    for obj in query.getPicks(startTime, endTime):
+        pick = seiscomp.datamodel.Pick.Cast(obj)
+        if pick:
+            objects[pick.publicID()] = pick
+
+    objects = filterObjects(objects, authorWhitelist=authors)
+
+    pickCount = len(objects)
+    seiscomp.logging.debug("loaded %d picks" % pickCount)
+
+    return objects
+
+
+def EventParametersPicks(ep):
+    """
+    Iterate over the picks in the EventParameters instance ep
+    """
+    for i in range(ep.pickCount()):
+        obj = seiscomp.datamodel.Pick.Cast(ep.pick(i))
+        if obj:
+            yield obj
+
+
+def InventoryIterator(inventory, time=None):
+    """
+    inventory is a SeisComP inventory instance. Note that this needs
+    to be an inventory incl. the streams. Otherwise this iterator
+    makes no sense.
+    """
+
+    for inet in range(inventory.networkCount()):
+        network = inventory.network(inet)
+        if time is not None and not operational(network, time):
+            continue
+
+        for ista in range(network.stationCount()):
+            station = network.station(ista)
+
+            if time is not None and not operational(station, time):
+                continue
+
+            for iloc in range(station.sensorLocationCount()):
+                location = station.sensorLocation(iloc)
+
+                if time is not None and not operational(location, time):
+                    continue
+
+                for istr in range(location.streamCount()):
+                    stream = location.stream(istr)
+
+                    if time is not None and not operational(stream, time):
+                        continue
+
+                    yield network, station, location, stream
