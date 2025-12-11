@@ -184,9 +184,10 @@ class App(seiscomp.client.Application):
         self.modelCSV = None
         self.modelConst = None
         self.test = False
-        self.center_latlon = None
+        self.centerLatLon = None
 
         self.maxDistance = 300.
+        self.minDepth = 1.
         self.maxDepth = 100.
 
         self.processingMode = "online"
@@ -227,6 +228,7 @@ class App(seiscomp.client.Application):
         self.commandline().addStringOption("Config", "whitelist", "specify stream whitelist")
         self.commandline().addStringOption("Config", "center-latlon", "specify network center lat,lon")
         self.commandline().addDoubleOption("Config", "max-distance", "specify network radius from center lat,lon")
+        self.commandline().addDoubleOption("Config", "min-depth", "specify min. hypocenter depth in km")
         self.commandline().addDoubleOption("Config", "max-depth", "specify max. hypocenter depth in km")
         self.commandline().addDoubleOption("Config", "pick-delay", "specify pick processing delay in seconds (experimental)")
         self.commandline().addStringOption("Config", "locator", "specify locator (default is LOCSAT)")
@@ -263,7 +265,17 @@ class App(seiscomp.client.Application):
         try:
             center = self.configGetStrings("scoctoloc.network.center")
             assert len(center) == 2
-            self.center_latlon = tuple(map(float, center))
+            self.centerLatLon = tuple(map(float, center))
+        except RuntimeError:
+            pass
+
+        try:
+            self.minDepth = self.configGetDouble("scoctoloc.minDepth")
+        except RuntimeError:
+            pass
+
+        try:
+            self.maxDepth = self.configGetDouble("scoctoloc.maxDepth")
         except RuntimeError:
             pass
 
@@ -282,11 +294,6 @@ class App(seiscomp.client.Application):
             self.modelConst = self.configGetString("scoctoloc.octo.model.const")
         except RuntimeError:
             self.modelConst = None
-
-        try:
-            self.maxDepth = self.configGetString("scoctoloc.maxDepth")
-        except RuntimeError:
-            pass
 
         try:
             self.min_num_p_picks = self.configGetInt("scoctoloc.minPickCountP")
@@ -381,17 +388,22 @@ class App(seiscomp.client.Application):
 
         try:
             tmp = self.commandline().optionString("center-latlon")
-            self.center_latlon = tuple(map(float, tmp.split(",")))
+            self.centerLatLon = tuple(map(float, tmp.split(",")))
         except RuntimeError:
-            self.center_latlon = None
+            self.centerLatLon = None
 
         try:
-            self.maxDistance = self.commandline().optionDouble("max-distance")
+            self.minDepth = self.commandline().optionDouble("min-depth")
         except RuntimeError:
             pass
 
         try:
             self.maxDepth = self.commandline().optionDouble("max-depth")
+        except RuntimeError:
+            pass
+
+        try:
+            self.maxDistance = self.commandline().optionDouble("max-distance")
         except RuntimeError:
             pass
 
@@ -476,15 +488,16 @@ class App(seiscomp.client.Application):
 
     def setupAssociators(self):
 
-        if self.center_latlon is not None:
-            center_lat, center_lon = self.center_latlon
+        if self.centerLatLon is not None:
+            centerLat, centerLon = self.centerLatLon
         else:
             pass
 
         seiscomp.logging.debug("Setting up associator")
         associator = scocto.octo.Associator(
-                center_lat, center_lon,
+                centerLat, centerLon,
                 max_dist=self.maxDistance,
+                min_depth=self.minDepth,
                 max_depth=self.maxDepth,
                 min_num_p_picks=self.min_num_p_picks,
                 min_num_s_picks=self.min_num_s_picks,
@@ -507,7 +520,6 @@ class App(seiscomp.client.Application):
 
         relocated = None
         fixedDepth = None
-        minDepth = 1.
 
         assert self._locatorInterface is not None
         loc = self._locatorInterface
@@ -558,9 +570,9 @@ class App(seiscomp.client.Application):
                 else:
                     relocated.setDepthType(seiscomp.datamodel.OPERATOR_ASSIGNED)
 
-                if relocated.depth().value() < minDepth and fixedDepth is None:
+                if relocated.depth().value() < self.minDepth and fixedDepth is None:
                     # Fix depth to minimum depth and relocate again
-                    fixedDepth = minDepth
+                    fixedDepth = self.minDepth
                     continue
 
             break
@@ -694,7 +706,7 @@ class App(seiscomp.client.Application):
         if not super().init():
             return False
 
-        if self.center_latlon is None:
+        if self.centerLatLon is None:
             raise RuntimeError("Must specify center-latlon")
 
         if self.modelCSV:

@@ -142,7 +142,7 @@ def createVelocityModelFromCSV(csv_filename):
 class Associator(pyocto.OctoAssociator):
 
     def __init__(self,
-            center_lat, center_lon, max_dist=1000., max_depth=250.,
+            center_lat, center_lon, max_dist=200., min_depth=1., max_depth=100.,
             min_num_p_picks=4,
             min_num_s_picks=0,
             min_num_p_and_s_picks=0,
@@ -154,6 +154,7 @@ class Associator(pyocto.OctoAssociator):
         self.center_lat = center_lat
         self.center_lon = center_lon
         self.max_dist  = max_dist
+        self.min_depth = min_depth
         self.max_depth = max_depth
 
         self.min_num_p_picks = min_num_p_picks
@@ -171,7 +172,7 @@ class Associator(pyocto.OctoAssociator):
         super().__init__(
             xlim=(-self.max_dist, self.max_dist),
             ylim=(-self.max_dist, self.max_dist),
-            zlim=(0.0, self.max_depth),
+            zlim=(self.min_depth, self.max_depth),
             time_before=300.0,
             velocity_model=velocity_model,
             n_picks=self.min_num_p_or_s_picks,
