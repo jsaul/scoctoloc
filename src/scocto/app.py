@@ -1,3 +1,18 @@
+###########################################################################
+# Copyright (C) GFZ Potsdam                                               #
+# All rights reserved.                                                    #
+#                                                                         #
+# Author: Joachim Saul (saul@gfz.de)                                      #
+#                                                                         #
+# GNU Affero General Public License Usage                                 #
+# This file may be used under the terms of the GNU Affero                 #
+# Public License version 3.0 as published by the Free Software Foundation #
+# and appearing in the file LICENSE included in the packaging of this     #
+# file. Please review the following information to ensure the GNU Affero  #
+# Public License version 3.0 requirements will be met:                    #
+# https://www.gnu.org/licenses/agpl-3.0.html.                             #
+###########################################################################
+
 import sys
 
 import pyrocko.modelling
@@ -605,6 +620,10 @@ class App(seiscomp.client.Application):
             quality.setMinimumDistance(distances[0])
             quality.setMaximumDistance(distances[-1])
             quality.setMedianDistance(numpy.median(distances))
+            agap = scocto.util.computeAzimuthalGap(relocated)
+            sgap = scocto.util.computeSecondaryAzimuthalGap(relocated)
+            quality.setAzimuthalGap(agap)
+            quality.setSecondaryAzimuthalGap(sgap)
             relocated.setQuality(quality)
             return relocated
 
