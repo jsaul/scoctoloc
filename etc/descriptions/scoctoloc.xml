@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<seiscomp>
+	<module name="scoctoloc" category="Processing">
+		<description>SeisComP associator/locator using PyOcto</description>
+		<configuration>
+			<group name="scoctoloc">
+				<parameter name="messagingGroup" type="string" default="PICK">
+					<description>
+						Messaging group on which scoctoloc listens for
+						picks to be processed.
+					</description>
+				</parameter>
+
+				<parameter name="pickAuthors" type="list:string">
+					<description>
+						Comma-separated list of allowed pick authors.
+						Empty by default.
+
+						If specified, only picks with an author in this
+						list will be processed. Useful if you run several
+						pickers in parallel and want to restrict
+						processing to only one of these.
+					</description>
+				</parameter>
+
+				<parameter name="targetMessagingGroup" type="string" default="MLTEST">
+					<description>
+						Send generated objects to this messaging group.
+					</description>
+				</parameter>
+
+				<parameter name="originAuthor" type="string" default="scoctoloc">
+					<description>
+						The author ID that all new origins will have.
+					</description>
+				</parameter>
+
+				<parameter name="maxDepth" type="double" default="100">
+					<description>
+						Max. hypocenter search depth in km.
+					</description>
+				</parameter>
+
+				<parameter name="minPickCountP" type="int" default="4">
+					<description>
+						Min. P-pick count
+					</description>
+				</parameter>
+
+				<parameter name="minPickCountS" type="int" default="1">
+					<description>
+						Min. S-pick count
+					</description>
+				</parameter>
+
+				<parameter name="minPickCountPAndS" type="int" default="1">
+					<description>
+						Min. number of stations with both P and S pick
+					</description>
+				</parameter>
+
+				<parameter name="minPickCountPOrS" type="int" default="4">
+					<description>
+						Min. number of stations with P or S pick, in other words min. number of picks.
+					</description>
+				</parameter>
+
+				<parameter name="locator" type="string" default="LOCSAT">
+					<description>
+						Locator to use
+					</description>
+				</parameter>
+
+				<group name="network">
+					<parameter name="center" type="list:string">
+						<description>
+							Comma separated pair of numbers being the
+							latitude and longitude of the network center.
+						</description>
+					</parameter>
+
+					<parameter name="radius" type="double" default="200">
+						<description>
+							Network radius in km relative to the center.
+						</description>
+					</parameter>
+
+				</group>
+				<group name="octo">
+					<parameter name="model.csv" type="string">
+						<description>
+							Filename of velocity model in csv format
+						</description>
+					</parameter>
+
+					<parameter name="model.const" type="list:string">
+						<description>
+							Constant-velocity model specification consisting of
+							one, two or three values representing P velocity,
+							S velocity and density, respectively, with the latter
+							two being optional and computed of missing.
+						</description>
+					</parameter>
+				</group>
+			</group>
+		</configuration>
+	</module>
+</seiscomp>
