@@ -409,7 +409,7 @@ class App(seiscomp.client.Application):
         if self.commandline().hasOption("whitelist"):
             filename = self.commandline().optionString("whitelist")
             seiscomp.logging.debug("Reading stream whitelist from " + filename)
-            self.whitelist = scocto.whitelist.StreamWhitelist(filename)
+            self.whitelist = scocto.whitelist.StreamWhitelist.FromFile(filename)
         else:
             self.whitelist = None
 
