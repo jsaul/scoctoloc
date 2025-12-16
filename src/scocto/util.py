@@ -292,6 +292,10 @@ def compareOrigins(a, b):
 
 
 def readEventParametersFromXML(xml):
+    """
+    Read the entire content of the specified XML file into one
+    EventParameters instance.
+    """
     seiscomp.logging.debug("Reading parametric data from " + xml)
 
     ar = seiscomp.io.XMLArchive()
@@ -308,6 +312,10 @@ def readEventParametersFromXML(xml):
 
 
 def readInventoryFromXML(xml):
+    """
+    Read the entire content of the specified XML file into one
+    Inventory instance.
+    """
     seiscomp.logging.debug("Reading inventory from " + xml)
 
     ar = seiscomp.io.XMLArchive()
@@ -319,6 +327,7 @@ def readInventoryFromXML(xml):
     inventory = seiscomp.datamodel.Inventory.Cast(obj)
     if inventory is None:
         raise TypeError(xml + ": no inventory found")
+
     return inventory
 
 
@@ -373,12 +382,10 @@ def loadPicksForTimespan(
         if pick:
             objects[pick.publicID()] = pick
 
+    seiscomp.logging.debug("Loaded %d picks from database" % len(objects))
     objects = filterObjects(objects, authorWhitelist=authors)
 
-    pickCount = len(objects)
-    seiscomp.logging.debug("loaded %d picks" % pickCount)
-
-    return objects
+    return objects.values()
 
 
 def EventParametersPicks(ep):

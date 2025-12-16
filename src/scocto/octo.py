@@ -143,12 +143,12 @@ def createConstantVelocityModel(spec_string):
     return velocity_model
 
 
-def createVelocityModelFromCSV(csv_filename):
+def createVelocityModelFromCSV(csv_filename, max_distance, max_depth):
     # Read model from file (requires pyrocko!)
     tmp_path = pathlib.Path("/tmp")
     model_path = tmp_path / "model"
     layers = pandas.read_csv(csv_filename)
-    pyocto.VelocityModel1D.create_model(layers, 1, self.max_distance, self.max_depth, model_path)
+    pyocto.VelocityModel1D.create_model(layers, 1, max_distance, max_depth, model_path)
     velocity_model = pyocto.VelocityModel1D(model_path, 2.0)
     return velocity_model
 
