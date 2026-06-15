@@ -127,6 +127,7 @@ class App(seiscomp.client.Application):
         self.want_raw_pyocto_locations = False
 
         self.use_pick_time = False
+        self.messagingGroup = "PICK"
         self.targetMessagingGroup = "LOCATION"
 
         self.pickAuthors = None
@@ -178,7 +179,12 @@ class App(seiscomp.client.Application):
         # Input config
 
         try:
-            self.targetMessagingGroup = self.configGetString("scoctoloc.messagingGroup")
+            self.messagingGroup = self.configGetString("scoctoloc.messagingGroup")
+        except RuntimeError:
+            pass
+
+        try:
+            self.targetMessagingGroup = self.configGetString("scoctoloc.targetMessagingGroup")
         except RuntimeError:
             pass
 
@@ -405,10 +411,30 @@ class App(seiscomp.client.Application):
         else:
             self.setDatabaseEnabled(True, True)
             self.setMessagingEnabled(True)
-            self.addMessagingSubscription("PICK")
-            self.addMessagingSubscription("MLTEST")
+            self.addMessagingSubscription(self.messagingGroup)
             self.addMessagingSubscription(self.targetMessagingGroup)
             self.setPrimaryMessagingGroup(self.targetMessagingGroup)
+
+    def _deriveCenterLatLonFromInventory(self):
+        lats = []
+        lons = []
+        if self.inventory is None:
+            return None
+
+        for inet in range(self.inventory.networkCount()):
+            net = self.inventory.network(inet)
+            for ista in range(net.stationCount()):
+                sta = net.station(ista)
+                try:
+                    lats.append(sta.latitude())
+                    lons.append(sta.longitude())
+                except ValueError:
+                    continue
+
+        if not lats:
+            return None
+
+        return sum(lats) / len(lats), sum(lons) / len(lons)
 
     def setupStreamWhitelist(self):
         if self.commandline().hasOption("whitelist"):
@@ -419,11 +445,7 @@ class App(seiscomp.client.Application):
             self.whitelist = None
 
     def setupAssociators(self):
-
-        if self.centerLatLon is not None:
-            centerLat, centerLon = self.centerLatLon
-        else:
-            pass
+        centerLat, centerLon = self.centerLatLon
 
         seiscomp.logging.debug("Setting up associator")
         associator = scocto.octo.Associator(
@@ -628,9 +650,6 @@ class App(seiscomp.client.Application):
         if not super().init():
             return False
 
-        if self.centerLatLon is None:
-            raise RuntimeError("Must specify center-latlon")
-
         if self.modelCSV:
             if self.modelConst:
                 raise RuntimeError("Cannot use two velocity models at the same time!")
@@ -647,6 +666,13 @@ class App(seiscomp.client.Application):
 
         self.setupStreamWhitelist()
         self.setupInventory()
+
+        if self.centerLatLon is None:
+            self.centerLatLon = self._deriveCenterLatLonFromInventory()
+
+        if self.centerLatLon is None:
+            raise RuntimeError("Must specify center-latlon or provide station coordinates in inventory")
+
         self.setupAssociators()
 
         self.setupLocator(self.locatorName)
@@ -750,6 +776,9 @@ class App(seiscomp.client.Application):
         return False
 
     def checkStation(self, pick):
+        if self.whitelist is None:
+            return True
+
         # Station whitelist match
         matches = self.whitelist.matches(pick.waveformID())
         msg = "pick " + pick.publicID()
