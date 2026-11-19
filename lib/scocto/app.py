@@ -14,6 +14,8 @@
 ###########################################################################
 
 import sys
+import pathlib
+import numpy
 
 import pyrocko.modelling
 
@@ -25,73 +27,26 @@ import seiscomp.io
 import seiscomp.logging
 import seiscomp.math
 
-import numpy
-import pyocto
 import scocto.octo
 import scocto.util
+import scocto.event
 import scocto.whitelist
 
 
-class MyEvent:
-    # Used here locally to associate origins of the same event
-    # and to remember the publication history.
-    def __init__(self):
-        # List of origins ordered by creation time
-        self.origins = dict()
+def anycast(obj, types=[]):
+    """
+    Cast a SeisComP Object to any Object subclass specified in types,
+    which is a list of types like Pick, Amplitide etc.
 
-        # Dict of all picks referenced by this event
-        self.picks = dict()
+    This may also serve as a type filter as only the types specified will
+    be considered.
 
-        # The currently preferred origin; usually self.origins[-1]
-        self.preferredOrigin = None
-
-        self.lastPublished = False
-
-    def set_origin(self, origin, picks):
-        method = origin.methodID()
-        if method not in self.origins:
-            self.origins[method] = list()
-        self.origins[method].append(origin)
-        for i in range(origin.arrivalCount()):
-            arr = origin.arrival(i)
-            self.picks[arr.pickID()] = picks[arr.pickID()]
-
-
-class MyEventList(list):
-
-    def find_matching_event(self, origin):
-
-        method = origin.methodID()
-
-        pick_ids = list()
-        for i in range(origin.arrivalCount()):
-            arr = origin.arrival(i)
-            pick_ids.append(arr.pickID())
-
-        matching_events = list()
-        for event in self:
-            if method not in event.origins:
-                continue
-
-            last = event.origins[method][-1]
-            if scocto.util.originTimeSeparation(last, origin) < 30 and \
-               scocto.util.originDistanceKm(last, origin) < 100:
-
-                common_pick_count = 0
-
-                for pick_id in pick_ids:
-                    if pick_id in event.picks:
-                        common_pick_count += 1
-
-                if common_pick_count:
-                    matching_events.append( (common_pick_count, event) )
-
-        if matching_events:
-            common_pick_count, matching_event = sorted(matching_events)[-1]
-            seiscomp.logging.debug("Number of matching events: %d" % (len(matching_events)))
-            for common_pick_count, event in matching_events:
-                seiscomp.logging.debug("Common pick count: %d" % common_pick_count)
-            return matching_event
+    The types are tried in the order specified, so if you expect many
+    Pick objects and want to process them, specify them early in the list.
+    """
+    for t in types:
+        if t.Cast(obj):
+            return t.Cast(obj)
 
 
 class App(seiscomp.client.Application):
@@ -100,47 +55,38 @@ class App(seiscomp.client.Application):
         super().__init__(argc, argv)
         self.setRecordStreamEnabled(False)
         self.setLoadInventoryEnabled(True)
+        self.setAutoApplyNotifierEnabled(True)  # enabled by default
+
+        # Main Associator config incl. PyOcto config
+        self.config = scocto.octo.Config()
+        self.startTime = self.endTime = None
+        self.want_raw_pyocto_locations = False
+        self.targetMessagingGroup = "LOCATION"
+        self.messagingGroups = [ "PICK" ]
 
         self.picks = dict()
         self.sortedPicks = list()
+        self.pickQueue = list()
+        self.usePickTime = False
+        self.pickAuthors = None
+        # Set empty phase hint to "P"
+        self.defaultPhaseHint = seiscomp.datamodel.Phase()
+        self.defaultPhaseHint.setCode("P")
 
         self.inventoryXML = None
-        self.modelCSV = None
-        self.modelConst = None
-        self.test = False
-        self.centerLatLon = None
-
-        self.maxDistance = 300.
-        self.minDepth = 1.
-        self.maxDepth = 100.
 
         self.processingMode = "online"
-        self.startTime = self.endTime = None
-
-        self.locatorName = "LOCSAT"
-
-        self.min_num_p_picks = 4
-        self.min_num_s_picks = 1
-        self.min_num_p_and_s_picks = 1
-        self.min_num_p_or_s_picks = 4
-
-        self.want_raw_pyocto_locations = False
-
-        self.use_pick_time = False
-        self.messagingGroup = "PICK"
-        self.targetMessagingGroup = "LOCATION"
-
-        self.pickAuthors = None
-
-        self.pickQueue = list()
-        self.pickDelay = 0
-        self.pickDelay = 180
-
-        self.debug_data_dir = None
-
-        self.event_list = MyEventList()
+        self.test = False
+        self.batchLength = None
 
         self.playbackTime = None
+        # This dict holds all picks that got associated to
+        # an origin during a playback. This way we make sure
+        # that the picks are present in the same XML file as
+        # the origins.
+        self.playbackAssociatedPicks = dict()
+
+        self.eventList = scocto.event.MyEventList()
 
     def createCommandLineDescription(self):
         self.commandline().addGroup("Input")
@@ -150,6 +96,7 @@ class App(seiscomp.client.Application):
         self.commandline().addStringOption("Input", "model-const", "specify P velocity[, S velocity[, density]]")
         self.commandline().addStringOption("Input", "start-time", "specify start time")
         self.commandline().addStringOption("Input", "end-time", "specify end time")
+        self.commandline().addDoubleOption("Input", "batch-length", "specify batch time window length in seconds")
         self.commandline().addGroup("Config")
         self.commandline().addStringOption("Config", "pick-authors", "specify list of allowed pick authors")
         self.commandline().addStringOption("Config", "whitelist", "specify stream whitelist")
@@ -157,10 +104,12 @@ class App(seiscomp.client.Application):
         self.commandline().addDoubleOption("Config", "max-distance", "specify network radius from center lat,lon")
         self.commandline().addDoubleOption("Config", "min-depth", "specify min. hypocenter depth in km")
         self.commandline().addDoubleOption("Config", "max-depth", "specify max. hypocenter depth in km")
+        self.commandline().addDoubleOption("Config", "association-cutoff-distance", "specify max. association distance in km")
+        self.commandline().addDoubleOption("Config", "location-cutoff-distance", "specify max. location distance in km")
+        self.commandline().addDoubleOption("Config", "pick-match-tolerance", "specify max. pick-match tolerance")
         self.commandline().addDoubleOption("Config", "pick-delay", "specify pick processing delay in seconds (experimental)")
         self.commandline().addStringOption("Config", "locator", "specify locator (default is LOCSAT)")
         self.commandline().addOption("Config", "test", "test mode - no results are sent to messaging")
-        self.commandline().addOption("Config", "debug-data-dir", "specify folder to dump input for debugging in PyOcto (off by default)")
 
         self.commandline().addGroup("Mode")
         self.commandline().addOption("Mode", "playback", "run in playback mode")
@@ -168,8 +117,8 @@ class App(seiscomp.client.Application):
         self.commandline().addOption("Mode", "use-pick-time", "when running in playback mode, use pick time as playback time")
         self.commandline().addGroup("Output")
         self.commandline().addStringOption("Output", "output-xml", "specify output xml file")
-        self.commandline().addStringOption("Output", "output-schedule", "specify output schedule in seconds after origin time as comma separated values")
         self.commandline().addOption("Output", "pyocto-locations", "produce raw PyOcto locations (before relocation)")
+        self.commandline().addStringOption("Output", "debug-data-dir", "produce PyOcto debug data")
         return True
 
     def initConfiguration(self):
@@ -179,12 +128,12 @@ class App(seiscomp.client.Application):
         # Input config
 
         try:
-            self.messagingGroup = self.configGetString("scoctoloc.messagingGroup")
+            self.targetMessagingGroup = self.configGetString("scoctoloc.targetMessagingGroup")
         except RuntimeError:
             pass
 
         try:
-            self.targetMessagingGroup = self.configGetString("scoctoloc.targetMessagingGroup")
+            self.messagingGroups = self.configGetStrings("scoctoloc.messagingGroups")
         except RuntimeError:
             pass
 
@@ -196,76 +145,100 @@ class App(seiscomp.client.Application):
         # Associator config
 
         try:
-            center = self.configGetStrings("scoctoloc.network.center")
-            assert len(center) == 2
-            self.centerLatLon = tuple(map(float, center))
+            latlon = self.configGetStrings("scoctoloc.network.center")
+            assert len(latlon) == 2
+            self.config.center_lat, self.config.center_lon = \
+                tuple(map(float, latlon))
         except RuntimeError:
             pass
 
         try:
-            self.minDepth = self.configGetDouble("scoctoloc.minDepth")
+            self.config.min_depth = self.configGetDouble("scoctoloc.minDepth")
         except RuntimeError:
             pass
 
         try:
-            self.maxDepth = self.configGetDouble("scoctoloc.maxDepth")
+            self.config.max_depth = self.configGetDouble("scoctoloc.maxDepth")
         except RuntimeError:
             pass
 
         try:
-            self.maxDistance = self.configGetDouble("scoctoloc.network.radius")
+            self.config.max_distance = self.configGetDouble("scoctoloc.network.radius")
         except RuntimeError:
             pass
 
         try:
-            self.modelCSV = self.configGetString("scoctoloc.octo.model.csv")
+            self.config.pyocto.velocity_model_csv_filename = self.configGetString("scoctoloc.octo.model.csv")
         except RuntimeError:
-            self.modelCSV = None
+            pass
 
         try:
             # Constant-velocity, single layer
-            self.modelConst = self.configGetString("scoctoloc.octo.model.const")
-        except RuntimeError:
-            self.modelConst = None
-
-        try:
-            self.min_num_p_picks = self.configGetInt("scoctoloc.minPickCountP")
+            self.config.pyocto.velocity_model_const = self.configGetString("scoctoloc.octo.model.const")
         except RuntimeError:
             pass
 
         try:
-            self.min_num_s_picks = self.configGetInt("scoctoloc.minPickCountS")
+            self.config.pyocto.tolerance = \
+                self.configGetDouble("scoctoloc.pyocto.tolerance")
         except RuntimeError:
             pass
 
         try:
-            self.min_num_p_and_s_picks = self.configGetInt("scoctoloc.minPickCountPAndS")
+            self.config.pyocto.association_cutoff_distance = \
+                self.configGetDouble("scoctoloc.pyocto.association_cutoff_distance")
         except RuntimeError:
             pass
 
         try:
-            self.min_num_p_or_s_picks = self.configGetInt("scoctoloc.minPickCountPOrS")
+            self.config.pyocto.location_cutoff_distance = \
+                self.configGetDouble("scoctoloc.pyocto.location_cutoff_distance")
         except RuntimeError:
             pass
 
         try:
-            self.pickDelay = self.configGetDouble("scoctoloc.pickDelay")
+            self.config.pyocto.pick_match_tolerance = \
+                self.configGetDouble("scoctoloc.pyocto.pick_match_tolerance")
+        except RuntimeError:
+            pass
+
+        try:
+            self.config.pyocto.n_picks = \
+                self.configGetInt("scoctoloc.pyocto.n_picks")
+        except RuntimeError:
+            pass
+
+        try:
+            self.config.pyocto.n_p_picks = \
+                self.configGetInt("scoctoloc.pyocto.n_p_picks")
+        except RuntimeError:
+            pass
+
+        try:
+            self.config.pyocto.n_s_picks = \
+                self.configGetInt("scoctoloc.pyocto.n_s_picks")
+        except RuntimeError:
+            pass
+
+        try:
+            self.config.pyocto.n_p_and_s_picks = \
+                self.configGetInt("scoctoloc.pyocto.n_p_and_s_picks")
+        except RuntimeError:
+            pass
+
+        try:
+            self.config.pick_delay = \
+                self.configGetDouble("scoctoloc.pickDelay")
         except RuntimeError:
             pass
 
         # Locator config
 
         try:
-            self.locatorName = self.configGetString("scoctoloc.locator")
+            self.config.locator_name = self.configGetString("scoctoloc.locator")
         except RuntimeError:
             pass
 
-        # Output config
-
-        try:
-            self.output_schedule = self.configGetStrings("scoctoloc.outputSchedule")
-        except RuntimeError:
-            pass
 
         return True
 
@@ -294,7 +267,7 @@ class App(seiscomp.client.Application):
             pass
 
         try:
-            self.locatorName = self.commandline().optionString("locator")
+            self.config.locator_name = self.commandline().optionString("locator")
         except RuntimeError:
             pass
 
@@ -314,43 +287,58 @@ class App(seiscomp.client.Application):
             self.outputXML = "-"
 
         try:
-            self.modelCSV = self.commandline().optionString("model-csv")
+            self.config.pyocto.velocity_model_csv_filename = self.commandline().optionString("model-csv")
         except RuntimeError:
             pass
 
         try:
             # Constant-velocity, single layer
-            self.modelConst = self.commandline().optionString("model-const")
+            self.config.pyocto.velocity_model_const = self.commandline().optionString("model-const")
         except RuntimeError:
             pass
 
         try:
-            tmp = self.commandline().optionString("center-latlon")
-            self.centerLatLon = tuple(map(float, tmp.split(",")))
-        except RuntimeError:
-            self.centerLatLon = None
-
-        try:
-            self.minDepth = self.commandline().optionDouble("min-depth")
+            self.config.pyocto.association_cutoff_distance = self.commandline().optionDouble("association-cutoff-distance")
         except RuntimeError:
             pass
 
         try:
-            self.maxDepth = self.commandline().optionDouble("max-depth")
+            self.config.pyocto.location_cutoff_distance = self.commandline().optionDouble("location-cutoff-distance")
         except RuntimeError:
             pass
 
         try:
-            self.maxDistance = self.commandline().optionDouble("max-distance")
+            self.config.pyocto.pick_match_tolerance = self.commandline().optionDouble("pick-match-tolerance")
+        except RuntimeError:
+            pass
+
+        try:
+            latlon = self.commandline().optionString("center-latlon")
+            self.config.center_lat, self.config.center_lon = \
+                tuple(map(float, latlon.split(",")))
+        except RuntimeError:
+            pass
+
+        try:
+            self.config.min_depth = self.commandline().optionDouble("min-depth")
+        except RuntimeError:
+            pass
+
+        try:
+            self.config.max_depth = self.commandline().optionDouble("max-depth")
+        except RuntimeError:
+            pass
+
+        try:
+            self.config.max_distance = self.commandline().optionDouble("max-distance")
         except RuntimeError:
             pass
 
         if self.commandline().hasOption("use-pick-time"):
-            self.use_pick_time = True
+            self.usePickPime = True
 
         try:
-            tmp = self.commandline().optionString("pick-delay")
-            self.pickDelay = float(tmp)
+            self.config.pick_delay = self.commandline().optionDouble("pick-delay")
         except RuntimeError:
             pass
 
@@ -358,11 +346,6 @@ class App(seiscomp.client.Application):
             self.pickAuthors = self.commandline().optionString("pick-authors").replace(",", " ").split()
         except RuntimeError:
             pass
-
-        try:
-            self.output_schedule = self.commandline().optionString("output-schedule").replace(",", " ").split()
-        except RuntimeError:
-            self.output_schedule = []
 
         try:
             startTime = self.commandline().optionString("start-time")
@@ -373,18 +356,24 @@ class App(seiscomp.client.Application):
         except RuntimeError:
             pass
 
-        if self.commandline().hasOption("pyocto-locations"):
-            self.want_raw_pyocto_locations = True
-
-        if self.commandline().hasOption("messaging-group"):
-            self.targetMessagingGroup = self.commandline().optionString("messaging-group")
-
         try:
-            self.debug_data_dir = self.commandline().optionString("debug-data-dir")
+            self.batchLength = self.commandline().optionDouble("batch-length")
         except RuntimeError:
             pass
 
-        self.output_schedule = [float(t) for t in self.output_schedule]
+        if self.commandline().hasOption("pyocto-locations"):
+            self.want_raw_pyocto_locations = True
+
+        if self.commandline().hasOption("messaging-groups"):
+            self.messagingGroups = self.commandline().optionString("messaging-groups").replace(",", " ").split()
+
+        if self.commandline().hasOption("target-messaging-group"):
+            self.targetMessagingGroup = self.commandline().optionString("target-messaging-group")
+
+        try:
+            self.config.debug_data_dir = self.commandline().optionString("debug-data-dir")
+        except RuntimeError:
+            pass
 
         self.setupMessagingAndDatabase()
 
@@ -405,17 +394,24 @@ class App(seiscomp.client.Application):
         return True
 
     def setupMessagingAndDatabase(self):
+
         if self.inputXML:
             self.setDatabaseEnabled(False, False)
             self.setMessagingEnabled(False)
         else:
             self.setDatabaseEnabled(True, True)
             self.setMessagingEnabled(True)
-            self.addMessagingSubscription(self.messagingGroup)
+            for messagingGroup in self.messagingGroups:
+                self.addMessagingSubscription(messagingGroup)
+            for group in self.messagingGroups:
+                self.addMessagingSubscription(group)
             self.addMessagingSubscription(self.targetMessagingGroup)
             self.setPrimaryMessagingGroup(self.targetMessagingGroup)
 
     def _deriveCenterLatLonFromInventory(self):
+        """
+        Compute the approximate center of the network
+        """
         lats = []
         lons = []
         if self.inventory is None:
@@ -445,30 +441,65 @@ class App(seiscomp.client.Application):
             self.whitelist = None
 
     def setupAssociators(self):
-        centerLat, centerLon = self.centerLatLon
 
         seiscomp.logging.debug("Setting up associator")
-        associator = scocto.octo.Associator(
-                centerLat, centerLon,
-                max_dist=self.maxDistance,
-                min_depth=self.minDepth,
-                max_depth=self.maxDepth,
-                min_num_p_picks=self.min_num_p_picks,
-                min_num_s_picks=self.min_num_s_picks,
-                min_num_p_and_s_picks=self.min_num_p_and_s_picks,
-                min_num_p_or_s_picks=self.min_num_p_or_s_picks,
-                velocity_model=self.velocityModel,
-                debug_data_dir=self.debug_data_dir)
+        associator = scocto.octo.Associator(self.config)
         associator.setInventory(self.inventory)
         associator.setPickAuthors(self.pickAuthors)
         self.associator = associator
 
         return True
 
-    def setupLocator(self, name):
-        seiscomp.logging.debug("Setting up locator " + name)
-        self.locatorInterface = seiscomp.seismology.LocatorInterface.Create(name)
+    def setupLocator(self):
+        seiscomp.logging.debug("Setting up locator " + self.config.locator_name)
+        self.locatorInterface = seiscomp.seismology.LocatorInterface.Create(self.config.locator_name)
+        assert self.locatorInterface is not None
         seiscomp.logging.debug("Finished locator setup")
+
+    def populateMetaData(self, origin):
+        if origin.methodID() == "PyOcto":
+             newPublicID = seiscomp.datamodel.Origin.Create().publicID().replace("/", "/PyOcto/")
+             origin.setPublicID(newPublicID)
+        ci = seiscomp.datamodel.CreationInfo()
+        ci.setCreationTime(self.now())
+        ci.setAgencyID(self.agencyID())
+        ci.setAuthor(self.author())
+        origin.setCreationInfo(ci)
+        origin.setEvaluationMode(seiscomp.datamodel.AUTOMATIC)
+        seiscomp.logging.debug("populateMetaData origin " + origin.publicID())
+
+    def populateOriginQuality(self, origin):
+        try:
+            quality = origin.originQuality()
+        except:
+            quality = seiscomp.datamodel.OriginQuality()
+
+        residuals = []
+        distances = []
+        associatedPhaseCount = 0
+        usedPhaseCount = 0
+        for i in range(origin.arrivalCount()):
+            arrival = origin.arrival(i)
+            distance = arrival.distance()
+            distances.append(distance)
+            if arrival.timeUsed():
+                usedPhaseCount += 1
+                residual = arrival.timeResidual()
+                residuals.append(residual)
+            associatedPhaseCount += 1
+        rms = numpy.sqrt(sum(numpy.array(residuals) ** 2)/len(residuals))
+        quality.setStandardError(rms)
+        quality.setAssociatedPhaseCount(associatedPhaseCount)
+        quality.setUsedPhaseCount(usedPhaseCount)
+        distances.sort()
+        quality.setMinimumDistance(distances[0])
+        quality.setMaximumDistance(distances[-1])
+        quality.setMedianDistance(numpy.median(distances))
+        agap = scocto.util.computeAzimuthalGap(origin)
+        sgap = scocto.util.computeSecondaryAzimuthalGap(origin)
+        quality.setAzimuthalGap(agap)
+        quality.setSecondaryAzimuthalGap(sgap)
+        origin.setQuality(quality)
 
     def relocate(self, origin):
         relocated = None
@@ -477,21 +508,16 @@ class App(seiscomp.client.Application):
         assert self.locatorInterface is not None
         loc = self.locatorInterface
 
-        def deepCloneOrigin(origin):
-            cloned = seiscomp.datamodel.Origin.Cast(origin.clone())
-            for iarr in range(origin.arrivalCount()):
-                arr = seiscomp.datamodel.Arrival.Cast(origin.arrival(iarr).clone())
-                cloned.add(arr)
-            return cloned
+        origin = scocto.util.deepCloneOrigin(origin)
 
-        origin = deepCloneOrigin(origin)
-
-        seiscomp.logging.debug("Before arrival loop")
+        # If timeUsed hasn't been set, set it to True and a weight of 1.
         for iarr in range(origin.arrivalCount()):
             arr = origin.arrival(iarr)
-            arr.setWeight(1)
-            arr.setTimeUsed(True)
-        seiscomp.logging.debug("After  arrival loop")
+            try:
+                arr.timeUsed()
+            except ValueError:
+                arr.setTimeUsed(True)
+                arr.setWeight(1)
 
         while True:
             if fixedDepth is None:
@@ -513,55 +539,25 @@ class App(seiscomp.client.Application):
                 seiscomp.logging.debug("Relocation failed")
 
             if relocated:
-                try:
-                    quality = relocated.originQuality()
-                except:
-                    quality = seiscomp.datamodel.OriginQuality()
-
                 if fixedDepth is None:
                     relocated.setDepthType(seiscomp.datamodel.FROM_LOCATION)
                 else:
                     relocated.setDepthType(seiscomp.datamodel.OPERATOR_ASSIGNED)
 
-                if relocated.depth().value() < self.minDepth and fixedDepth is None:
+                if relocated.depth().value() < self.config.min_depth and fixedDepth is None:
                     # Fix depth to minimum depth and relocate again
-                    fixedDepth = self.minDepth
+                    fixedDepth = self.config.min_depth
+                    continue
+
+                if relocated.depth().value() > self.config.max_depth and fixedDepth is None:
+                    # Fix depth to maximum depth and relocate again
+                    fixedDepth = self.config.max_depth
                     continue
 
             break
 
         if relocated:
-            try:
-                quality = relocated.originQuality()
-            except:
-                quality = seiscomp.datamodel.OriginQuality()
-
-            residuals = []
-            distances = []
-            associatedPhaseCount = 0
-            usedPhaseCount = 0
-            for i in range(relocated.arrivalCount()):
-                arrival = relocated.arrival(i)
-                residual = arrival.timeResidual()
-                residuals.append(residual)
-                distance = arrival.distance()
-                distances.append(distance)
-                if arrival.timeUsed():
-                    usedPhaseCount += 1
-                associatedPhaseCount += 1
-            rms = numpy.sqrt(sum(numpy.array(residuals) ** 2)/len(residuals))
-            quality.setStandardError(rms)
-            quality.setAssociatedPhaseCount(associatedPhaseCount)
-            quality.setUsedPhaseCount(usedPhaseCount)
-            distances.sort()
-            quality.setMinimumDistance(distances[0])
-            quality.setMaximumDistance(distances[-1])
-            quality.setMedianDistance(numpy.median(distances))
-            agap = scocto.util.computeAzimuthalGap(relocated)
-            sgap = scocto.util.computeSecondaryAzimuthalGap(relocated)
-            quality.setAzimuthalGap(agap)
-            quality.setSecondaryAzimuthalGap(sgap)
-            relocated.setQuality(quality)
+            self.populateOriginQuality(relocated)
             return relocated
 
     def relocateOrigins(self, origins):
@@ -577,111 +573,41 @@ class App(seiscomp.client.Application):
             for origin in discarded_origins:
                 origins.remove(origin)
 
-    def process(self, objects):
-        origins = self.associator.process(objects)
-
-        return origins
-
-    def runOffline(self, objects):
-        """
-        This is the offline processing (not playback) workflow
-
-        - Load Inventory from file
-        - Load EventParameters from file
-        - Convert everything internally to PyOcto objects
-        - Run the PyOcto associator
-        - From the newly nucleated origins and the associations
-          update the EventParameters in place
-        - Write back EventParameters to file
-        - done
-        """
-        origins = self.process(objects)
-
-        self.relocateOrigins(origins)
-
-
-        ep = self.ep
         for origin in origins:
-            ep.add(origin)
-
-        return True
-
-    def runPlayback(self, objects):
-        """
-        Another offline processing workflow, but here the picks
-        are fed into the processing sequentially, one by one, in
-        the order of either their creation time (which is the
-        default) or optionally their pick time.
-
-        This allows simulation of the real-time behaviour of the
-        associator/locator. If playback order is determined by
-        pick time (--use-pick-time), then also picks created much
-        later (e.g. due to data acquisition latency or post
-        processing) can be played back like in real time.
-
-        - Load EventParameters from file
-        - Sort objects by creation time (or optionally pick time)
-        - Feed the objects to the processing via addObject
-        - For each fed pick run the PyOcto associator
-        - If an origin could be generated, it is saved to produce
-          a history of the origins as function of time. The origin
-          creation time will be the creation time of the current pick
-          plus epsilon.
-        - Finally write back EventParameters to file
-        """
-        # Sort objects by either creation or pick time
-        objectTime = scocto.util.pickTime if self.use_pick_time else scocto.util.creationTime
-        objects.sort(key=lambda obj: objectTime(obj))
-
-        for obj in objects:
-            seiscomp.logging.debug(obj.publicID())
-
-        for obj in objects:
-            self.addObject("", obj)
-
-        # Process any remaining picks
-        self.processPickQueue()
+            self.populateMetaData(origin)
 
 
-        return True
 
     def init(self):
 
         if not super().init():
             return False
 
-        if self.modelCSV:
-            if self.modelConst:
-                raise RuntimeError("Cannot use two velocity models at the same time!")
-            self.velocityModel = scocto.octo.createVelocityModelFromCSV(self.modelCSV, self.maxDistance, self.maxDepth)
-        elif self.modelConst:
-            self.velocityModel = scocto.octo.createConstantVelocityModel(self.modelConst)
-        else:
-            seiscomp.logging.warning("Using default constant-velocity model with vp,vs,rh=7,4,2")
-            self.velocityModel = pyocto.VelocityModel0D(7, 4, 2)
-
         if self.processingMode not in ["playback", "dump picks"]:
             if self.startTime is not None:
                 self.processingMode = "offline"
 
+        if self.config.center_lat is None or self.config.center_lon is None:
+            latlon = self._deriveCenterLatLonFromInventory()
+            if latlon:
+                self.config.center_lat, self.config.center_lon = latlon
+            else:
+                raise RuntimeError("Must specify center-latlon or provide station coordinates in inventory")
+
         self.setupStreamWhitelist()
         self.setupInventory()
-
-        if self.centerLatLon is None:
-            self.centerLatLon = self._deriveCenterLatLonFromInventory()
-
-        if self.centerLatLon is None:
-            raise RuntimeError("Must specify center-latlon or provide station coordinates in inventory")
-
         self.setupAssociators()
 
-        self.setupLocator(self.locatorName)
+        if self.processingMode == "dump picks":
+            return True
+
+        self.setupLocator()
 
         return True
 
-    def loadInputData(self, startTime, endTime):
+    def _loadInputObjects(self, startTime, endTime):
         """
-        Load input data from either database or XML file and return a list of objects.
+        Load input data from database or XML file and return a list of (typed) objects.
 
         This is for offline processing or playback. In online processing mode new
         objects are received from the messaging via addObject().
@@ -690,19 +616,24 @@ class App(seiscomp.client.Application):
         if self.inputXML and self.inventoryXML:
             ep = scocto.util.readEventParametersFromXML(self.inputXML)
             objects = list()
-            for obj in scocto.util.EventParametersPicks(ep):
-                pick = seiscomp.datamodel.Pick.Cast(obj)
+            objectTime = scocto.util.pickTime
+            for pick in scocto.util.EventParametersPicks(ep):
                 if self.startTime is not None and self.endTime is not None:
-                    if not startTime <= scocto.util.pickTime(pick) <= endTime:
+                    if not startTime <= objectTime(pick) <= endTime:
                         continue
                 objects.append(pick)
         elif self.startTime is not None and self.endTime is not None:
-            # database query in online mode, no EventParameters to read from/write to
             objects = scocto.util.loadPicksForTimespan(self.query(), startTime, endTime)
         else:
             objects = list()
 
-        objects = [obj for obj in objects if self.checkPick(obj)]
+        for obj in objects:
+            if scocto.util.isPick(obj):
+                phaseHint = scocto.util.phaseHint(obj)
+                if phaseHint not in ["P", "S"]:
+                    obj.setPhaseHint(self.defaultPhaseHint)
+
+        objects = [obj for obj in objects if self._checkPick(obj)]
         seiscomp.logging.debug("Keeping %d picks" % len(objects))
 
         return objects
@@ -717,48 +648,90 @@ class App(seiscomp.client.Application):
         """
 
         seiscomp.logging.debug("Running in " + self.processingMode + " mode")
+        seiscomp.logging.debug("pickDelay = %g" % self.config.pick_delay)
 
-        if self.processingMode != "online":
-            objects = self.loadInputData(self.startTime, self.endTime)
+        if self.processingMode == "online":
 
-            if not objects:
-                seiscomp.logging.error("No objects read!")
+            timeout_interval = 1
+            self.enableTimer(timeout_interval)
+
+            return super().run()
+
+        # Treatment of all non-online modes
+
+        self.ep = seiscomp.datamodel.EventParameters()
+
+        if not self.inputXML and self.batchLength is not None:
+            batchLength = seiscomp.core.TimeSpan(self.batchLength)
+        else:
+            batchLength = self.endTime - self.startTime
+
+        batchStartTime = self.startTime
+        while batchStartTime < self.endTime:
+            if self.isExitRequested():
                 return False
 
-            self.ep = seiscomp.datamodel.EventParameters()
-            for obj in objects:
-                self.ep.add(obj)
+            batchEndTime = batchStartTime + batchLength
+            if batchEndTime > self.endTime:
+                batchEndTime = self.endTime
+            batchObjects = self._loadInputObjects(batchStartTime, batchEndTime)
+            batchStartTime += batchLength
 
             if self.processingMode == "playback":
-                OK = self.runPlayback(objects)
+                # Sort objects by either creation or pick time
+                objectTime = scocto.util.pickTime if self.usePickTime else scocto.util.creationTime
+                batchObjects.sort(key=lambda obj: objectTime(obj))
+
+                for obj in batchObjects:
+                    seiscomp.logging.debug(obj.publicID())
+
+                for obj in batchObjects:
+                    if scocto.util.isPick(obj):
+                        self._addPick(obj)
+
             elif self.processingMode == "offline":
-                OK = self.runOffline(objects)
-            elif self.processingMode == "dump picks":
-                # Nothing else to do
-                OK = True
-            else:
-                seiscomp.logging.error("Wrong processing mode " + self.processingMode)
-                return False
+                self.associator.feed(batchObjects)
 
-            if OK:
-                seiscomp.logging.debug("Writing output to %s" % self.outputXML)
-                ar = seiscomp.io.XMLArchive()
-                ar.setFormattedOutput(True)
-                ar.create(self.outputXML)
-                ar.writeObject(self.ep)
-                ar.close()
-                return True
-            else:
-                seiscomp.logging.debug("NOT writing output to %s" % self.outputXML)
-                return False
+            if self.processingMode in ("offline", "dump picks"):
+                # Add all input objects to output.
+                for obj in batchObjects:
+                    self.ep.add(obj)
 
 
-        timeout_interval = 1
-        self.enableTimer(timeout_interval)
+        if self.processingMode == "playback":
+            # Process any remaining picks
+            self._processPickQueue()
 
-        return super().run()
+            for pickID in self.playbackAssociatedPicks:
+                pick = self.playbackAssociatedPicks[pickID]
+                self.ep.add(pick)
 
-    def checkPickAuthor(self, pick):
+        elif self.processingMode == "offline":
+            origins = self.associator.process()
+
+            self.relocateOrigins(origins)
+
+
+            ep = self.ep
+            for origin in origins:
+                ep.add(origin)
+
+        elif self.processingMode == "dump picks":
+            pass
+        else:
+            seiscomp.logging.error("Wrong processing mode " + self.processingMode)
+            return False
+
+        # Final output
+        seiscomp.logging.debug("Writing output to %s" % self.outputXML)
+        ar = seiscomp.io.XMLArchive()
+        ar.setFormattedOutput(True)
+        ar.create(self.outputXML)
+        ar.writeObject(self.ep)
+        ar.close()
+        return True
+
+    def _checkPickAuthor(self, pick):
         """
         Author check against the specified list of pick authors.
 
@@ -775,24 +748,24 @@ class App(seiscomp.client.Application):
             )
         return False
 
-    def checkStation(self, pick):
-        if self.whitelist is None:
+    def _checkStation(self, pick):
+        """
+        Station whitelist match
+        """
+        if not self.whitelist:
             return True
 
-        # Station whitelist match
         matches = self.whitelist.matches(pick.waveformID())
-        msg = "pick " + pick.publicID()
-        if matches:
-            msg = msg + " matches stream whitelist"
-        else:
-            msg = msg + " no match with stream whitelist -> stop"
+        ##msg = "pick " + pick.publicID()
+        ##if matches:
+        ##else:
         return matches
 
-    def checkPick(self, pick):
-        if not self.checkStation(pick):
+    def _checkPick(self, pick):
+        if not self._checkStation(pick):
             return False
 
-        if not self.checkPickAuthor(pick):
+        if not self._checkPickAuthor(pick):
             return False
 
         if not self.associator.accepts(pick):
@@ -800,7 +773,7 @@ class App(seiscomp.client.Application):
 
         return True
 
-    def storePick(self, pick):
+    def _storePick(self, pick):
         self.picks[pick.publicID()] = pick
         self.sortedPicks.append(pick)
         objectTime = scocto.util.pickTime
@@ -808,42 +781,62 @@ class App(seiscomp.client.Application):
         self.pickQueue.append(pick)
 
         if self.processingMode == "playback":
-            pickCreationTime = scocto.util.creationTime(pick)
-            if self.playbackTime is None:
-                self.playbackTime = pickCreationTime
-            else:
-                self.playbackTime = max(self.playbackTime, pickCreationTime)
-            seiscomp.logging.debug("Playback time is now %s" % (scocto.util.time2str(self.playbackTime)))
+            self._updatePlaybackTime(pick)
         return True
+
+    def _updatePlaybackTime(self, obj):
+        """
+        Update the playback time from the creation time of the object.
+        """
+        if not self.processingMode == "playback":
+            raise RuntimeError()
+        creationTime = scocto.util.creationTime(obj)
+        if self.playbackTime is None:
+            self.playbackTime = creationTime
+        else:
+            self.playbackTime = max(self.playbackTime, creationTime)
+        tstr = scocto.util.time2str(self.playbackTime)
+        seiscomp.logging.debug("Playback time is now %s" % (tstr,))
 
     def now(self):
         if self.processingMode == "online":
             return seiscomp.core.Time.UTC()
-        else:
+        elif self.playbackTime is not None:
             return self.playbackTime
+        else:
+            return seiscomp.core.Time.UTC()
 
-    def processPickQueue(self):
+
+    def _due(self, pick, now=None):
+        if not now:
+            now = self.now()
+        getTime = scocto.util.pickTime if self.usePickTime else scocto.util.creationTime
+        if float(now - getTime(pick)) >= self.config.pick_delay:
+            return True
+        return False
+
+    def _processPickQueue(self):
         now = self.now()
         processedPicks = list()
         for pick in self.pickQueue:
-            if float(now - scocto.util.pickTime(pick)) < self.pickDelay:
-                # pick not yet due
-                continue
-            self.processPick(pick)
-            processedPicks.append(pick)
+            if self._due(pick):
+                self._processPick(pick)
+                processedPicks.append(pick)
         for pick in processedPicks:
             self.pickQueue.remove(pick)
 
         return True
 
-    def processPick(self, new_pick):
+    def _processPick(self, new_pick):
+        if self.isExitRequested():
+            return
+
         seiscomp.logging.info("Processing pick " + new_pick.publicID())
         if self.processingMode == "playback":
-            tstr = scocto.util.time2str(scocto.util.creationTime(new_pick))
-            seiscomp.logging.debug("Playback time is " + tstr)
+            seiscomp.logging.debug("Playback time is " + scocto.util.time2str(self.now()))
 
         # Process pick in the context of other picks within a small time window
-        dt = seiscomp.core.TimeSpan(120 + self.pickDelay)
+        dt = seiscomp.core.TimeSpan(120 + self.config.pick_delay)
         tmin = new_pick.time().value() - dt
         tmax = new_pick.time().value() + dt
         time = scocto.util.pickTime
@@ -861,18 +854,25 @@ class App(seiscomp.client.Application):
 
                 seiscomp.logging.debug("%+7.3f %s %s" % (dt, ph, pick.publicID()))
 
-        if len(picks) < self.min_num_p_picks:
+        if len(picks) < self.config.pyocto.n_p_picks:
             return
 
-        origins = self.process(picks)
+        seiscomp.logging.debug("Feeding associator with %d picks" % len(picks))
+
+        self.associator.clear()
+        self.associator.feed(picks)
+        origins = self.associator.process()
         if not origins:
             return
 
         filtered_origins = []
 
         for origin in origins:
+            msg = "candidate origin " + origin.publicID() + (" with %d arrivals" % origin.arrivalCount())
+            seiscomp.logging.debug(msg)
+
             if not scocto.util.originReferencesPick(origin, new_pick):
-                msg = "new origin " + origin.publicID() + \
+                msg = "candidate origin " + origin.publicID() + \
                     " doesn't reference new pick " + new_pick.publicID()
                 seiscomp.logging.debug(msg)
                 seiscomp.logging.debug("Dismissing this origin")
@@ -891,7 +891,7 @@ class App(seiscomp.client.Application):
             s = scocto.util.printOrigin(origin, self.sortedPicks)
             seiscomp.logging.info(s)
 
-            matching_event = self.event_list.find_matching_event(origin)
+            matching_event = self.eventList.find_matching_event(origin)
 
             method = origin.methodID()
 
@@ -907,8 +907,8 @@ class App(seiscomp.client.Application):
             else:
                 seiscomp.logging.debug("new event")
                 seiscomp.logging.debug("improvement: %d -> %d" % (0, origin.arrivalCount()))
-                matching_event = MyEvent()
-                self.event_list.append(matching_event)
+                matching_event = scocto.event.MyEvent()
+                self.eventList.append(matching_event)
 
             matching_event.set_origin(origin, self.picks)
 
@@ -919,52 +919,51 @@ class App(seiscomp.client.Application):
             origins.remove(discarded_origin)
 
         for origin in origins:
-            if origin.methodID() == "PyOcto":
-                newPublicID = seiscomp.datamodel.Origin.Create().publicID().replace("/", "/PyOcto/")
-                origin.setPublicID(newPublicID)
-            now = self.now()
-            ci = seiscomp.datamodel.CreationInfo()
-            ci.setAgencyID(self.agencyID())
-            ci.setAuthor(self.author())
-            ci.setCreationTime(now)
-            origin.setCreationInfo(ci)
-            origin.setEvaluationMode(seiscomp.datamodel.AUTOMATIC)
+            self.populateMetaData(origin)
 
-        if self.processingMode == "playback":
-            for origin in origins:
-                self.ep.add(origin)
-        else:
+        if self.processingMode == "online":
+            # prepare notifier message
             ep = seiscomp.datamodel.EventParameters()
             seiscomp.datamodel.Notifier.Enable()
             for origin in origins:
                 ep.add(origin)
             msg = seiscomp.datamodel.Notifier.GetMessage()
             seiscomp.datamodel.Notifier.Disable()
-
-        if self.processingMode != "online" or self.commandline().hasOption("test"):
-            for origin in origins:
-                seiscomp.logging.info("test/offline/playback mode - not sending " + origin.publicID())
-        else:
-            if self.connection().send(msg):
+            if self.commandline().hasOption("test"):
                 for origin in origins:
-                    seiscomp.logging.info("sent " + origin.publicID())
+                    seiscomp.logging.info("test mode - not sending " + origin.publicID())
             else:
-                for origin in origins:
-                    seiscomp.logging.info("failed to send " + origin.publicID())
+                if self.connection().send(msg):
+                    for origin in origins:
+                        seiscomp.logging.info("sent " + origin.publicID())
+                else:
+                    for origin in origins:
+                        seiscomp.logging.info("failed to send " + origin.publicID())
+        else:
+            # offline/playback mode
+            for origin in origins:
+                self.ep.add(origin)
+
+                for i in range(origin.arrivalCount()):
+                    arrival = origin.arrival(i)
+                    pick = seiscomp.datamodel.Pick.Find(arrival.pickID())
+                    self.playbackAssociatedPicks[arrival.pickID()] = pick
 
         return True
 
-    def addPick(self, pick):
+    def _addPick(self, pick):
         """
         Feed a new pick to the processing
+
+        Called in online and playback mode.
         """
-        if not self.checkPick(pick):
+        if not self._checkPick(pick):
             return
 
-        if not self.storePick(pick):
+        if not self._storePick(pick):
             return
 
-        if not self.processPickQueue():
+        if not self._processPickQueue():
             return
 
     def addObject(self, parentID, obj):
@@ -973,16 +972,20 @@ class App(seiscomp.client.Application):
         """
         if self.isExitRequested():
             return
-        pick = seiscomp.datamodel.Pick.Cast(obj)
-        if pick:
-            self.addPick(pick)
+
+        types = [ seiscomp.datamodel.Pick ]
+        obj = anycast(obj, types)
+
+        if type(obj) is seiscomp.datamodel.Pick:
+            return self._addPick(obj)
 
     def cleanup(self):
         pass
 
     def handleTimeout(self):
-        self.processPickQueue()
+        self._processPickQueue()
         self.cleanup()
+
 
 def main():
     app = App(len(sys.argv), sys.argv)

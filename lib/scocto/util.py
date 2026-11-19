@@ -15,6 +15,7 @@
 
 import seiscomp.datamodel
 import seiscomp.io
+import seiscomp.logging
 import math
 import numpy
 
@@ -62,6 +63,24 @@ def pickTime(pick):
     return pick.time().value()
 
 
+def author(obj):
+    try:
+        return obj.creationInfo().author()
+    except ValueError:
+        return ""
+
+
+def isPick(obj):
+    return type(obj) is seiscomp.datamodel.Pick
+
+
+def phaseHint(pick, default=None):
+    try:
+        return pick.phaseHint().code()
+    except ValueError:
+        return default
+
+
 def nslc(obj):
     """
     Convenience function to retrieve network, station, location and
@@ -93,9 +112,8 @@ def printOrigin(origin, picks):
     dep = origin.depth().value()
     lines.append("public id  %s" % origin.publicID())
     try:
-        author = origin.creationInfo().author()
-        if author:
-            lines.append("author     %s" % origin.creationInfo().author())
+        if author(origin):
+            lines.append("author     %s" % author(origin))
     except ValueError:
         pass
     try:
@@ -365,8 +383,7 @@ def filterObjects(objects, authorWhitelist=None, agencyWhitelist=None):
 def loadPicksForTimespan(
     query, startTime, endTime, authors=None):
     """
-    Load from the database all picks within the given time span. If specified,
-    also all amplitudes that reference any of these picks may be returned.
+    Load from the database all picks within the given time span.
     """
 
     seiscomp.logging.debug("loading picks for %s ... %s" % (
@@ -388,14 +405,19 @@ def loadPicksForTimespan(
     return objects.values()
 
 
-def EventParametersPicks(ep):
+def EventParametersPicks(ep, startTime=None, endTime=None):
     """
     Iterate over the picks in the EventParameters instance ep
     """
     for i in range(ep.pickCount()):
-        obj = seiscomp.datamodel.Pick.Cast(ep.pick(i))
-        if obj:
-            yield obj
+        pick = seiscomp.datamodel.Pick.Cast(ep.pick(i))
+        if pick:
+            t = pick.time().value()
+            if startTime is not None and t < startTime:
+                continue
+            if endTime is not None and t > endTime:
+                continue
+            yield pick
 
 
 def InventoryIterator(inventory, time=None):
@@ -422,13 +444,7 @@ def InventoryIterator(inventory, time=None):
                 if time is not None and not operational(location, time):
                     continue
 
-                for istr in range(location.streamCount()):
-                    stream = location.stream(istr)
-
-                    if time is not None and not operational(stream, time):
-                        continue
-
-                    yield network, station, location, stream
+                yield network, station, location
 
 
 def PublicObjectCast(obj):
@@ -444,3 +460,11 @@ def PublicObjectCast(obj):
         if typedObject:
             return typedObject
     return obj
+
+
+def deepCloneOrigin(origin):
+    cloned = seiscomp.datamodel.Origin.Cast(origin.clone())
+    for iarr in range(origin.arrivalCount()):
+        arr = seiscomp.datamodel.Arrival.Cast(origin.arrival(iarr).clone())
+        cloned.add(arr)
+    return cloned

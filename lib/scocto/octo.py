@@ -24,176 +24,156 @@ import pyproj
 import pyocto
 
 
-# Directory where debug data are written to
-debug_data_dir = pathlib.Path("debug")
-
-
-def convertPicksToPyOcto(objects):
-    log.debug("Preparing pyocto picks")
-    picks = pandas.core.frame.DataFrame()
-
-    _st  = list()
-    _ph = list()
-    _tm = list()
-    _ev = list()
-    _id = list()
-    for obj in objects:
-        pick = seiscomp.datamodel.Pick.Cast(obj)
-        if not pick:
-            continue 
-        n, s, l, c = scocto.util.nslc(pick)
-        _st.append("%s.%s.%s" % (n, s, l))
-        try:
-            ph = str(pick.phaseHint().code())
-        except ValueError:
-            ph = "P"
-        if not ph:
-            ph = "P"
-        _ph.append(ph)
-        tm = scocto.util.time2str(pick.time().value())
-        tm = pandas.Timestamp(tm)
-        _tm.append(tm)
-        _ev.append(0)
-        _id.append(pick.publicID())
-    picks["station"] = _st
-    picks["phase"] = _ph
-    picks["time"] = _tm
-    picks["event"] = [-1]*len(_ev)
-    picks["public_id"] = _id
-
-    picks["time"] = picks["time"].apply(lambda x: x.timestamp())
-
-    return picks
-
-
 origin_count = 0
 
 
-def convertOriginFromPyocto(ievent, idx, pyocto_stations, pyocto_events, pyocto_assignments):
-    global origin_count
-
-    events = pyocto_events
-    assign = pyocto_assignments
-
-    origin_count += 1
-    public_id = "Origin/PyOcto/%09d" % (origin_count)
-    elat = seiscomp.datamodel.RealQuantity( events["latitude"][ievent] )
-    elon = seiscomp.datamodel.RealQuantity( events["longitude"][ievent] )
-    edep = seiscomp.datamodel.RealQuantity( events["depth"][ievent] )
-    etim = events["time"][ievent]
-    etim = seiscomp.core.Time() + seiscomp.core.TimeSpan(etim.timestamp())
-    etim = seiscomp.datamodel.TimeQuantity(etim)
-    origin = seiscomp.datamodel.Origin(public_id)
-    origin.setTime(etim)
-    origin.setLatitude(elat)
-    origin.setLongitude(elon)
-    origin.setDepth(edep)
-    origin.setMethodID("PyOcto")
-    origin.setEvaluationMode(seiscomp.datamodel.AUTOMATIC)
-    origin.setEvaluationStatus(seiscomp.datamodel.PRELIMINARY)
-
-    for ipick, event_idx in enumerate(assign["event_idx"]):
-        if event_idx != idx:
-            continue
-        pick_id = assign["public_id"][ipick]
-        residual = assign["residual"][ipick]
-        phase = assign["phase"][ipick]
-        scode = assign["station"][ipick]
-
-        arrival = seiscomp.datamodel.Arrival()
-        arrival.setPickID(pick_id)
-        arrival.setPhase(seiscomp.datamodel.Phase(phase))
-        arrival.setTimeResidual(residual)
-        i = pyocto_stations["id"].to_list().index(scode)
-        slat = pyocto_stations["latitude"][i]
-        slon = pyocto_stations["longitude"][i]
-        delta, az, baz = seiscomp.math.delazi(elat.value(), elon.value(), slat, slon)
-        arrival.setAzimuth(az)
-        arrival.setDistance(delta)
-
-        origin.add(arrival)
-
-    return origin
-
-
-def createConstantVelocityModel(spec_string):
+class PyOctoConfig:
     """
-    Create a constant-velocity model from a specification string in the format
-    vp, vs, rh
+    PyOcto-specific config parameters used by scoctoloc
+
+    We follow the PyOcto parameter naming as closely as possible.
+    Not all PyOcto parameters are supported, like the geographic
+    projections and related xlim, ylim
     """
-    values = tuple(map(float, spec_string.split(",")))
-    if not 0 < len(values) < 4:
-        log.error("failed to parse single layer spec '%s'" % spec_string)
-        return False
-    vs = rh = None
-    if len(values) >= 1:
-        vp = values[0]
-    if len(values) >= 2:
-        vs = values[1]
-    if len(values) == 3:
-        rh = values[2]
-    if not vs:
-        vs = vp/(3**0.5)
-    if not rh:
-        # from Bertheussen, 1977
-        rh = 0.77 + 0.32*vp
+    def __init__(self):
+        # These are passed to the associator
+        self.n_picks = 6
+        self.n_p_picks = 4
+        self.n_s_picks = 2
+        self.n_p_and_s_picks = 2
 
-    log.debug("Using constant-velocity model with vp,vs,rh=%.3f,%.3f,%.3f" % (vp, vs, rh))
-    velocity_model = pyocto.VelocityModel0D(vp, vs, rh)
-    return velocity_model
+        self.time_before = 300.
+
+        # VelocityModel0D specification
+        self.velocity_model_const = None
+
+        # VelocityModel1D
+        self.velocity_model_csv_filename = None
+
+        # Constant velocity
+        # used only in PyOcto's VelocityModel0D
+        self.p_velocity = 7
+        self.s_velocity = 4
+
+        # Surface velocity for elevation correction
+        # used only in PyOcto's VelocityModel1D
+        self.surface_p_velocity = None
+        self.surface_s_velocity = None
+
+        # These are passed to both VelocityModel0D and VelocityModel1D
+        self.tolerance = 6.
+        self.association_cutoff_distance = 250
+        self.location_cutoff_distance = 150
+        self.pick_match_tolerance = 6.
+
+        # FIXME: not-yet supported parameters
+        self.time_slicing = 1200.
+        self.min_node_size = 10.
+        self.min_node_size_location = 1.5
+        self.min_interevent_time = 3
+        self.refinement_iterations = 3
+        self.max_pick_overlap = 4
+        self.min_pick_fraction = 0.25
+        self.exponential_edt = False
+        self.edt_pick_std = 1.0
+        self.location_split_depth = 6
+        self.location_split_return = 4
+        self.n_threads = None
+        self.node_log_interval = 0
+        self.queue_memory_protection_dfs_size = 500000
+        self.second_pass_overwrites = None
+
+        # Unsupported/replaced PyOcto parameters:
+        # xlim, ylim are replaced by a circular region around (center_lat, center_lon) with max_distance as radius
+        # zlim is replaced by min_depth, max_depth
 
 
-def createVelocityModelFromCSV(csv_filename, max_distance, max_depth):
-    # Read model from file (requires pyrocko!)
-    tmp_path = pathlib.Path("/tmp")
-    model_path = tmp_path / "model"
-    layers = pandas.read_csv(csv_filename)
-    pyocto.VelocityModel1D.create_model(layers, 1, max_distance, max_depth, model_path)
-    velocity_model = pyocto.VelocityModel1D(model_path, 2.0)
-    return velocity_model
+class Config:
+    """
+    Non-PyOcto-specific config parameters used by scoctoloc
+    """
+    def __init__(self):
+        # These are passed to the associator
+        self.pyocto = PyOctoConfig()
+        self.center_lat = None
+        self.center_lon = None
+        self.max_distance = 800
+
+        # Earthquake min, max and default depth
+        self.min_depth =   1
+        self.max_depth = 100
+        self.default_depth = 10
+
+        self.pick_delay = 60.
+
+        self.locator_name = "LOCSAT"
+
+        self.debug_data_dir = None
+        # FIXME
+        self.debug_data_dir = "debug-dir"
 
 
 class Associator(pyocto.OctoAssociator):
 
-    def __init__(self,
-            center_lat, center_lon, max_dist=200., min_depth=1., max_depth=100.,
-            min_num_p_picks=4,
-            min_num_s_picks=0,
-            min_num_p_and_s_picks=0,
-            min_num_p_or_s_picks=4,
-            velocity_model=None,
-            debug_data_dir=None):
-        self.pick_match_tolerance = 6.
+    def __init__(self, config):
+        self.config = config
 
-        self.center_lat = center_lat
-        self.center_lon = center_lon
-        self.max_dist  = max_dist
-        self.min_depth = min_depth
-        self.max_depth = max_depth
+        # Setup of PyOcto velocity model
+        # This velocity model is *only* used in the association.
+        if self.config.pyocto.velocity_model_csv_filename:
+            if self.config.pyocto.velocity_model_const:
+                raise RuntimeError("Cannot use two velocity models at the same time!")
+            velocity_model = self.createVelocityModelFromCSV()
+        elif self.config.pyocto.velocity_model_const:
+            velocity_model = self.createConstantVelocityModel()
+        else:
+            # Default constant-velocity model
+            log.warning("Using default constant-velocity model with vp,vs,rh=7,4,2")
+            velocity_model = pyocto.VelocityModel0D(7, 4, 2)
 
-        self.min_num_p_picks = min_num_p_picks
-        self.min_num_s_picks = min_num_s_picks
-        self.min_num_p_and_s_picks = min_num_p_and_s_picks
-        self.min_num_p_or_s_picks = min_num_p_or_s_picks
+        if self.config.debug_data_dir:
+            # If debug_data_dir is specified, debug output is written
+            # in a format that can be read directly by PyOcto.
+            log.debug("Enabling PyOcto debug output to %s" % str(self.config.debug_data_dir))
+            self.debug_data_dir = pathlib.Path(self.config.debug_data_dir)
+            self.debug_data_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+        else:
+            self.debug_data_dir = None
 
-        assert velocity_model is not None
+        crs_local = pyproj.CRS(proj='aeqd', lat_0=self.config.center_lat, lon_0=self.config.center_lon, datum='WGS84', type='crs')
 
-        self.enablePyOctoDebugOutput(debug_data_dir)
+        xlim = (-self.config.max_distance, self.config.max_distance)
+        ylim = (-self.config.max_distance, self.config.max_distance)
+        zlim = (self.config.min_depth, self.config.max_depth)
 
-        log.debug("Center latitude, longitude = %.3f, %.3f" % (center_lat, center_lon))
-        crs_local = pyproj.CRS(proj='aeqd', lat_0=center_lat, lon_0=center_lon, datum='WGS84', type='crs')
+        log.debug("  center lat, lon = %.3f, %.3f" % (self.config.center_lat, self.config.center_lon))
+        log.debug("  max_distance = %g" % self.config.max_distance)
+        log.debug("Initializing pyocto.OctoAssociator")
+        log.debug("  xlim = (%f, %f)" % xlim)
+        log.debug("  ylim = (%f, %f)" % ylim)
+        log.debug("  zlim = (%f, %f)" % zlim)
+        log.debug("  time_before = %f" % self.config.pyocto.time_before)
+        log.debug("  velocity_model = %s" % str(velocity_model))
+        log.debug("  n_picks = %d" % self.config.pyocto.n_picks)
+        log.debug("  n_p_picks = %d" % self.config.pyocto.n_p_picks)
+        log.debug("  n_s_picks = %d" % self.config.pyocto.n_s_picks)
+        log.debug("  n_p_and_s_picks = %d" % self.config.pyocto.n_p_and_s_picks)
+        log.debug("  association_cutoff_distance = %g" % self.config.pyocto.association_cutoff_distance)
+        log.debug("  location_cutoff_distance = %g" % self.config.pyocto.location_cutoff_distance)
+        log.debug("  pick_match_tolerance = %d" % self.config.pyocto.pick_match_tolerance)
+        log.debug("  crs = %s" % str(crs_local))
 
         super().__init__(
-            xlim=(-self.max_dist, self.max_dist),
-            ylim=(-self.max_dist, self.max_dist),
-            zlim=(self.min_depth, self.max_depth),
-            time_before=300.0,
+            xlim=xlim,
+            ylim=ylim,
+            zlim=zlim,
+            time_before=self.config.pyocto.time_before,
             velocity_model=velocity_model,
-            n_picks=self.min_num_p_or_s_picks,
-            n_p_picks=self.min_num_p_picks,
-            n_s_picks=self.min_num_s_picks,
-            n_p_and_s_picks=self.min_num_p_and_s_picks,
-            pick_match_tolerance=self.pick_match_tolerance,
+            n_picks=self.config.pyocto.n_picks,
+            n_p_picks=self.config.pyocto.n_p_picks,
+            n_s_picks=self.config.pyocto.n_s_picks,
+            n_p_and_s_picks=self.config.pyocto.n_p_and_s_picks,
+            pick_match_tolerance=self.config.pyocto.pick_match_tolerance,
             crs=crs_local,)
 
         # This is a list of only network, station, location codes of the
@@ -204,12 +184,7 @@ class Associator(pyocto.OctoAssociator):
         # White list of accepted pick authors
         self.accepted_authors = ["scautopick"]
 
-    def enablePyOctoDebugOutput(self, debug_data_dir):
-        self.debug_data_dir = debug_data_dir
-        if not self.debug_data_dir:
-            return
-        self.debug_data_dir = pathlib.Path(debug_data_dir)
-        self.debug_data_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+        self.pyocto_picks = None
 
     def setPickAuthors(self, authors):
         """
@@ -217,22 +192,25 @@ class Associator(pyocto.OctoAssociator):
         """
         self.accepted_authors = authors
 
-    def convertInventoryToPyOcto(self, inventory, whitelist=None):
-        log.debug("Preparing pyocto inventory")
+    def _convertInventoryToPyOcto(self, inventory, whitelist=None):
+        """
+        Convert a SeisComP inventory to a PyOcto inventory 
+        """
+        log.debug("Preparing PyOcto inventory")
         stations = pandas.core.frame.DataFrame()
 
         tmp = dict()
         for item in scocto.util.InventoryIterator(inventory):
-            network, station, location, stream = item
+            network, station, location = item
             n, s, l = network.code(), station.code(), location.code()
             # Only keep the stations matching the whitelist
             streamid = seiscomp.datamodel.WaveformStreamID(n, s, l, "*", "")
             if whitelist and not whitelist.matches(streamid):
                 continue
             delta, az, baz = seiscomp.math.delazi(
-                self.center_lat, self.center_lon,
+                self.config.center_lat, self.config.center_lon,
                 location.latitude(), location.longitude())
-            if delta*111.195 > self.max_dist:
+            if delta*111.195 > self.config.max_distance:
                 continue
 
             tmp[n, s, l] = (location.latitude(), location.longitude(), location.elevation())
@@ -282,32 +260,76 @@ class Associator(pyocto.OctoAssociator):
 
         return True
 
-    def process(self, picks):
+    def clear(self):
+        """
+        Removes acquired picks
+        """
+        self.pyocto_picks = None
+
+    def feed(self, picks):
+        """
+        Acquire picks.
+
+        This is incremental and will append picks to existing picks
+        if called sequentially.
+        """
         filtered_picks = []
         for pick in picks:
             if not self.accepts(pick):
                 log.debug("pick " + pick.publicID() + " rejected")
                 continue
             filtered_picks.append(pick)
-        if len(filtered_picks) < self.min_num_p_picks:
-            log.debug("Too few picks left %d - stop" % (len(filtered_picks)))
+
+        pyocto_picks = self._preparePicksForPyOcto(filtered_picks)
+        if self.pyocto_picks:
+            for key in pyocto_picks:
+                self.pyocto_picks[key].extend(pyocto_picks[key])
+        else:
+            self.pyocto_picks = pyocto_picks
+
+    def process(self):
+        """
+        Process all acquired picks
+        """
+        # A final check
+        pick_count = len(self.pyocto_picks["time"])
+        if pick_count < self.config.pyocto.n_p_picks:
+            log.debug("Too few picks left %d - stop" % pick_count)
             return []
 
-        pyocto_picks = convertPicksToPyOcto(filtered_picks)
+        log.debug("Processing %d picks" % pick_count)
+
+        # Before processing convert the whole pick dict to a pandas DataFrame
+        pyocto_picks = pandas.core.frame.DataFrame()
+        pyocto_picks["station"] = self.pyocto_picks["station"]
+        pyocto_picks["phase"] = self.pyocto_picks["phase"]
+        pyocto_picks["time"] = self.pyocto_picks["time"]
+        pyocto_picks["event"] = self.pyocto_picks["event"]
+        pyocto_picks["public_id"] = self.pyocto_picks["public_id"]
+
+        pyocto_picks["time"] = pyocto_picks["time"].apply(lambda x: x.timestamp())
+
         if self.debug_data_dir:
             # This file can be used as input for @yetinam's PyOcto examples,
             # which may be useful for debugging.
-            pyocto_picks.to_parquet(self.debug_data_dir / "picks")
+            debug_picks_file = self.debug_data_dir / "picks"
+            if debug_picks_file.exists():
+                for i in range(999):
+                    debug_picks_file = self.debug_data_dir / ("picks-%03d" % (i+1))
+                    if not debug_picks_file.exists():
+                        break
+            log.debug("Dumping PyOcto pick data to %s" % (str(debug_picks_file)))
+            pyocto_picks.to_parquet(debug_picks_file)
 
         log.debug("Running associator")
         t0 = time.time()
         pyocto_events, pyocto_assignments = \
             self.associate(pyocto_picks, self.pyocto_stations)
+        t1 = time.time()
+        log.debug("Association took %.3f seconds" % (t1-t0,))
         if pyocto_events.empty:
             log.debug("No origins")
             return []
-        t1 = time.time()
-        log.debug("Association took %.3f seconds" % (t1-t0,))
         log.debug("Generated %d origins using %d picks" % (
             len(pyocto_events), len(pyocto_assignments)))
 
@@ -328,8 +350,9 @@ class Associator(pyocto.OctoAssociator):
 
         origins = list()
         for ievent, idx in enumerate(pyocto_events["idx"]):
-            origin = convertOriginFromPyocto(ievent, idx, self.pyocto_stations, pyocto_events, pyocto_assignments)
-            origins.append(origin)
+            origin = self.convertOriginFromPyOcto(ievent, idx, self.pyocto_stations, pyocto_events, pyocto_assignments)
+            if origin:
+                origins.append(origin)
 
         return origins
 
@@ -338,4 +361,178 @@ class Associator(pyocto.OctoAssociator):
         Set up internal pyocto station list based on the SeisComP inventory
         """
         self.inventory = inventory
-        self.convertInventoryToPyOcto(inventory, whitelist)
+        self._convertInventoryToPyOcto(inventory, whitelist)
+
+    def _preparePicksForPyOcto(self, objects):
+        log.debug("Preparing pyocto picks")
+
+        allowed_phases = "P", "S"
+        default_phase = "P"
+
+        _station  = list()
+        _phase = list()
+        _time = list()
+        _event = list()
+        _public_id = list()
+        for obj in objects:
+            pick = seiscomp.datamodel.Pick.Cast(obj)
+            if not pick:
+                continue 
+            n, s, l, c = scocto.util.nslc(pick)
+            _station.append("%s.%s.%s" % (n, s, l))
+            try:
+                phase = str(pick.phaseHint().code())
+            except ValueError:
+                phase = default_phase
+            if phase not in allowed_phases:
+                phase = default_phase
+            _phase.append(phase)
+            time = scocto.util.time2str(pick.time().value())
+            time = pandas.Timestamp(time)
+            _time.append(time)
+            _event.append(-1)
+            _public_id.append(pick.publicID())
+
+        picks = dict()
+        picks["station"] = _station
+        picks["phase"] = _phase
+        picks["time"] = _time
+        picks["event"] = _event
+        picks["public_id"] = _public_id
+
+        return picks
+
+    def convertOriginFromPyOcto(self, ievent, idx, pyocto_stations, pyocto_events, pyocto_assignments):
+        global origin_count
+
+        events = pyocto_events
+        assign = pyocto_assignments
+
+        origin_count += 1
+        public_id = "Origin/PyOcto/%09d" % (origin_count)
+        elat = seiscomp.datamodel.RealQuantity( events["latitude"][ievent] )
+        elon = seiscomp.datamodel.RealQuantity( events["longitude"][ievent] )
+        edep = seiscomp.datamodel.RealQuantity( events["depth"][ievent] )
+        etim = events["time"][ievent]
+        etim = seiscomp.core.Time() + seiscomp.core.TimeSpan(etim.timestamp())
+        etim = seiscomp.datamodel.TimeQuantity(etim)
+        origin = seiscomp.datamodel.Origin(public_id)
+        origin.setTime(etim)
+        origin.setLatitude(elat)
+        origin.setLongitude(elon)
+        origin.setDepth(edep)
+        origin.setMethodID("PyOcto")
+        origin.setEvaluationMode(seiscomp.datamodel.AUTOMATIC)
+        origin.setEvaluationStatus(seiscomp.datamodel.PRELIMINARY)
+
+        n_p_picks = 0
+        n_s_picks = 0
+
+        for ipick, event_idx in enumerate(assign["event_idx"]):
+            if event_idx != idx:
+                continue
+            pick_id = assign["public_id"][ipick]
+            residual = assign["residual"][ipick]
+            phase = assign["phase"][ipick]
+            scode = assign["station"][ipick]
+
+            arrival = seiscomp.datamodel.Arrival()
+            arrival.setPickID(pick_id)
+            arrival.setPhase(seiscomp.datamodel.Phase(phase))
+            arrival.setTimeResidual(residual)
+            i = pyocto_stations["id"].to_list().index(scode)
+            slat = pyocto_stations["latitude"][i]
+            slon = pyocto_stations["longitude"][i]
+            delta, az, baz = seiscomp.math.delazi(elat.value(), elon.value(), slat, slon)
+            arrival.setAzimuth(az)
+            arrival.setDistance(delta)
+
+            origin.add(arrival)
+
+            # count P and S arrivals
+            if phase[0] == "P":
+                n_p_picks += 1
+            elif phase[0] == "S":
+                n_s_picks += 1
+            else:
+                pass
+
+        n_picks = n_p_picks + n_s_picks
+
+        conf = self.config.pyocto
+        if n_p_picks < conf.n_p_picks or \
+           n_s_picks < conf.n_s_picks or \
+           n_picks   < conf.n_picks:
+            log.warning("Origin from PyOcto does not meet minimum-pick count criteria")
+            if n_p_picks < conf.n_p_picks:
+                log.warning("  n_p_picks: %2d < %2d" % (n_p_picks, conf.n_p_picks))
+            if n_s_picks < self.config.pyocto.n_s_picks:
+                log.warning("  n_s_picks: %2d < %2d" % (n_s_picks, conf.n_s_picks))
+            if n_picks < self.config.pyocto.n_picks:
+                log.warning("  n_picks:   %2d < %2d" % (n_picks, conf.n_picks))
+            return None
+
+        return origin
+
+    def createConstantVelocityModel(self):
+        """
+        Create a constant-velocity model from a specification string in the format
+        vp, vs, rh
+        """
+        tolerance = self.config.pyocto.tolerance
+        association_cutoff_distance = self.config.pyocto.association_cutoff_distance
+        location_cutoff_distance = self.config.pyocto.location_cutoff_distance
+        spec_string = self.config.pyocto.velocity_model_const
+        values = tuple(map(float, spec_string.split(",")))
+        if len(values) == 1:
+            vp = values[0]
+            vs = vp/(3**0.5)
+        elif len(values) == 2:
+            vp, vs = values
+        else:
+            log.error("Failed to parse single layer spec '%s'" % spec_string)
+            return False
+        # sanity check
+        if not 1 < vp < 9 or not 0 < vs < 5.2:
+            log.error("Unreasonable velocity values vp, vs = %.3f, %.3f" % (vp, vs))
+            return False
+
+        log.debug("Using constant-velocity model with vp, vs = %.3f, %.3f" % (vp, vs))
+        return pyocto.VelocityModel0D(
+                vp, vs,
+                self.config.pyocto.tolerance,
+                self.config.pyocto.association_cutoff_distance)
+#               self.config.pyocto.location_cutoff_distance)
+
+
+    def createVelocityModelFromCSV(self):
+        csv_filename = self.config.pyocto.velocity_model_csv_filename
+
+        # Grid spacing in kilometer
+        delta = 1.
+
+        # Read model from file (requires pyrocko!)
+
+        tmp_path = pathlib.Path("/tmp")
+        model_path = tmp_path / "model"
+        layers = pandas.read_csv(csv_filename)
+        # xdist is the model size. It is twice the max_distance (which is
+        # a radius from our network center) and should be larger than the
+        # association_cutoff_distance.
+        xdist = self.config.max_distance * 2.
+        if xdist < self.config.pyocto.association_cutoff_distance:
+            raise RuntimeError("Model size %g smaller than association_cutoff_distance %g" % (self.config.max_distance, self.config.pyocto.association_cutoff_distance))
+
+        # zdist ist the model depth. It must be large enough to accommodate
+        # the deepest-penetrating rays used for the travel time computation.
+        # The max_distance should normally be more than enough.
+        zdist = self.config.max_distance
+        pyocto.VelocityModel1D.create_model(layers, delta, xdist, zdist, model_path)
+
+        return pyocto.VelocityModel1D(
+                model_path,
+                self.config.pyocto.tolerance,
+                self.config.pyocto.association_cutoff_distance,
+# removed       self.config.pyocto.location_cutoff_distance,
+                self.config.pyocto.surface_p_velocity,
+                self.config.pyocto.surface_s_velocity)

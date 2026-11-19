@@ -43,12 +43,13 @@ class DevelopCommand(develop):
         super().run()
         _copy_etc_to_seiscomp_root()
 
+
 setup(
     name="scoctoloc",
 
     description="Real-time event association/location for SeisComP using PyOcto",
 
-    version="0.0.7",
+    version="0.3.0",
 
     url='https://github.com/jsaul/scoctoloc',
 
@@ -70,5 +71,4 @@ setup(
         'install': InstallCommand,
         'develop': DevelopCommand,
     },
-
 )
