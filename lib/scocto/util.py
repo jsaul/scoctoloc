@@ -420,6 +420,31 @@ def EventParametersPicks(ep, startTime=None, endTime=None):
             yield pick
 
 
+def operational(obj, time):
+    """         
+    Return True if the inventory item 'obj' is considered
+    operational at the specified time. False is returned otherwise.
+    """
+    # If the start time of an inventory item is not
+    # known, it is not considered operational.
+    try:
+        start = obj.start()
+        assert time >= start
+    except:
+        return False
+
+    # If the end time of an inventory item is not
+    # known it is considered "open end".
+    try:
+        end = obj.end()
+        if time > end:
+            return False
+    except:
+        pass
+
+    return True
+
+
 def InventoryIterator(inventory, time=None):
     """
     inventory is a SeisComP inventory instance. Note that this needs
